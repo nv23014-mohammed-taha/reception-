@@ -1,5 +1,6 @@
-streamlit>=1.25.0
+streamlit
 pandas
 dateparser
-sqlite3  # built-in, no need to install
+sqlite3  
 mistral-sdk
+mistralai
