@@ -1,38 +1,46 @@
-# robust_receptionist.py
+# robust_receptionist_zip.py
 import pandas as pd
-import os
-import glob
+import zipfile
 import streamlit as st
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.pipeline import make_pipeline
-import kagglehub
 import dateparser
 import sqlite3
+import os
 
 # --- 1. DATA & MODEL SETUP ---
 st.title("🤖 AI Healthcare Receptionist")
-st.markdown("Local NLP model trained on clinical call data. Supports Arabic & English dates.")
+st.markdown("Supports booking appointments with English & Arabic dates.")
 
-# Download dataset from Kaggle
-path = kagglehub.dataset_download("ammarshafiq/healthcare-appointment-booking-calls-dataset")
-csv_files = glob.glob(os.path.join(path, "*.csv"))
+dataset_zip = "healthcare-appointment-booking-calls-dataset.zip"  # your downloaded zip
 
-if csv_files:
-    df = pd.read_csv(csv_files[0])
-    df = df[['Transcription', 'Action']].dropna()
-    if len(df) == 0:
-        st.warning("Dataset is empty. Model will not work properly.")
-    model = make_pipeline(TfidfVectorizer(), MultinomialNB())
-    model.fit(df['Transcription'], df['Action'])
+if os.path.exists(dataset_zip):
+    with zipfile.ZipFile(dataset_zip, 'r') as zip_ref:
+        # find the CSV file inside the zip
+        csv_files = [f for f in zip_ref.namelist() if f.endswith(".csv")]
+        if csv_files:
+            with zip_ref.open(csv_files[0]) as f:
+                df = pd.read_csv(f)
+                df = df[['Transcription', 'Action']].dropna()
+                if len(df) == 0:
+                    st.warning("Dataset is empty. Using fallback.")
+                    model = None
+                else:
+                    model = make_pipeline(TfidfVectorizer(), MultinomialNB())
+                    model.fit(df['Transcription'], df['Action'])
+        else:
+            st.warning("No CSV found in ZIP. Using fallback.")
+            model = None
 else:
-    st.warning("Dataset not found. Using fallback (intent detection may fail).")
+    st.warning("ZIP dataset not found. Using fallback.")
     model = None
 
 # --- 2. DATABASE SETUP ---
 conn = sqlite3.connect("appointments.db", check_same_thread=False)
 c = conn.cursor()
 
+# Create tables
 c.execute("""
 CREATE TABLE IF NOT EXISTS doctors (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,7 +60,7 @@ CREATE TABLE IF NOT EXISTS appointments (
 """)
 conn.commit()
 
-# Add sample doctors if table empty
+# Add sample doctors
 if c.execute("SELECT COUNT(*) FROM doctors").fetchone()[0] == 0:
     c.executemany("INSERT INTO doctors (name, specialty) VALUES (?, ?)",
                   [("Dr. Ahmed", "General"),
@@ -81,7 +89,6 @@ def get_intent_and_confidence(text):
             confidence = max(probs)
             intent = model.classes_[probs.argmax()]
         except Exception:
-            # fallback if predict_proba fails
             intent = model.predict([text])[0]
             confidence = 1.0
     else:
@@ -90,8 +97,7 @@ def get_intent_and_confidence(text):
     return intent, confidence
 
 def extract_datetime(text):
-    dt = dateparser.parse(text, languages=["en", "ar"])
-    return dt
+    return dateparser.parse(text, languages=["en", "ar"])
 
 def available_doctors(date, time):
     booked_ids = [row[0] for row in c.execute(
@@ -110,12 +116,10 @@ if prompt := st.chat_input("How can I help you today?"):
 
     # CONTINUE FLOW IF MID-APPOINTMENT
     if st.session_state.stage != "start":
-
         if st.session_state.stage == "get_name":
             st.session_state.appointment_data["patient_name"] = prompt
             response = "Great. What date would you like for your appointment?"
             st.session_state.stage = "get_date"
-
         elif st.session_state.stage == "get_date":
             dt = extract_datetime(prompt)
             if dt:
@@ -123,8 +127,7 @@ if prompt := st.chat_input("How can I help you today?"):
                 response = "Got it. What time works best for you?"
                 st.session_state.stage = "get_time"
             else:
-                response = "I couldn’t understand the date. Please say something like 'tomorrow' or 'March 25' (English or Arabic)."
-
+                response = "I couldn’t understand the date. Please try 'tomorrow' or 'March 25' (English or Arabic)."
         elif st.session_state.stage == "get_time":
             dt = extract_datetime(prompt)
             if dt:
@@ -159,14 +162,11 @@ Anything else I can help with?
     else:
         if confidence < 0.6:
             response = "I’m not sure I understood. Do you want to book, reschedule, or ask something else?"
-
         elif "Appointment" in intent:
             response = "Sure! Let's book your appointment. What's your name?"
             st.session_state.stage = "get_name"
-
         elif "Reschedule" in intent:
             response = "Sure, I can help reschedule your appointment. Please provide your booking ID."
-
         else:
             response = "I can help with booking, rescheduling, or general questions. What do you need?"
 
