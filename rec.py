@@ -1,14 +1,12 @@
-# ai_receptionist_mistral.py
-
 import streamlit as st
 import sqlite3
 import dateparser
 import json
 from mistral_sdk import MistralClient
 
-
 # --- SETUP ---
-st.title("🤖 AI Healthcare Receptionist (Smart AI Version)")
+st.title("🤖 AI Healthcare Receptionist (Mistral AI)")
+st.markdown("Supports English & Arabic dates. Book, reschedule, or cancel appointments.")
 
 client = MistralClient(api_key=st.secrets["MISTRAL_API_KEY"])
 
@@ -27,7 +25,7 @@ time TEXT)
 """)
 conn.commit()
 
-# Insert doctors
+# Insert doctors if empty
 if c.execute("SELECT COUNT(*) FROM doctors").fetchone()[0] == 0:
     c.executemany("INSERT INTO doctors (name) VALUES (?)",
                   [("Dr. Ahmed",), ("Dr. Sara",), ("Dr. Khalid",)])
@@ -37,7 +35,7 @@ if c.execute("SELECT COUNT(*) FROM doctors").fetchone()[0] == 0:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Show chat
+# Display chat history
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
@@ -65,12 +63,10 @@ Return ONLY JSON like:
 
 User: {user_input}
 """
-
     response = client.chat(
         model="mistral-small",
         messages=[{"role": "user", "content": prompt}]
     )
-
     try:
         return json.loads(response.choices[0].message.content)
     except:
@@ -98,21 +94,18 @@ if prompt := st.chat_input("Type here..."):
 
     # --- BOOKING ---
     if intent == "book":
-
         if not name:
             response = "What's your name?"
         elif not date or not time:
             response = "Please provide date and time."
         else:
             parsed_date, parsed_time = parse_datetime(date, time)
-
             if parsed_date and parsed_time:
                 c.execute(
                     "INSERT INTO appointments (patient_name, doctor_name, date, time) VALUES (?, ?, ?, ?)",
                     (name, doctor or "Any Doctor", parsed_date, parsed_time)
                 )
                 conn.commit()
-
                 response = f"""
 ✅ Appointment Confirmed!
 
