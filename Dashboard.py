@@ -58,3 +58,11 @@ if st.button("🚨 Reset All Hospital Data"):
     conn.close()
     st.success("All records cleared.")
     st.rerun()
+    # Add this to the bottom of Dashboard.py
+with open("hospital_management.db", "rb") as f:
+    st.download_button(
+        label="💾 Download Database File (.db)",
+        data=f,
+        file_name="hospital_data_backup.db",
+        mime="application/x-sqlite3"
+    )
