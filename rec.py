@@ -1,17 +1,22 @@
-# robust_receptionist.py
+# final_receptionist.py
 import pandas as pd
 import os
-import glob
 import streamlit as st
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.pipeline import make_pipeline
-import kagglehub
 import dateparser
 import sqlite3
 import zipfile
 
+# --- 1. UI ---
+st.title("🤖 AI Healthcare Receptionist")
+st.markdown("Supports booking with English & Arabic dates.")
+
+# --- 2. LOAD DATA FROM ZIP ONLY ---
 dataset_zip = "healthcare-appointment-booking-calls-dataset.zip"
+
+model = None
 
 if os.path.exists(dataset_zip):
     with zipfile.ZipFile(dataset_zip, 'r') as zip_ref:
@@ -20,180 +25,149 @@ if os.path.exists(dataset_zip):
             with zip_ref.open(csv_files[0]) as f:
                 df = pd.read_csv(f)
                 df = df[['Transcription', 'Action']].dropna()
-                if len(df) == 0:
-                    st.warning("Dataset is empty. Using fallback.")
-                    model = None
-                else:
-                    # Train the model
+
+                if len(df) > 0:
                     model = make_pipeline(TfidfVectorizer(), MultinomialNB())
                     model.fit(df['Transcription'], df['Action'])
-                    st.success("Dataset loaded. NLP model ready!")
+                    st.success("✅ Model loaded successfully!")
+                else:
+                    st.error("Dataset is empty.")
         else:
-            st.warning("No CSV found in ZIP. Using fallback.")
-            model = None
+            st.error("No CSV found in ZIP.")
 else:
-    st.warning("ZIP dataset not found. Using fallback.")
-    model = None
-# --- 1. DATA & MODEL SETUP ---
-st.title("🤖 AI Healthcare Receptionist")
-st.markdown("Local NLP model trained on clinical call data. Supports Arabic & English dates.")
+    st.error("ZIP file not found.")
 
-# Download dataset from Kaggle
-path = kagglehub.dataset_download("ammarshafiq/healthcare-appointment-booking-calls-dataset")
-csv_files = glob.glob(os.path.join(path, "*.csv"))
-
-if csv_files:
-    df = pd.read_csv(csv_files[0])
-    df = df[['Transcription', 'Action']].dropna()
-    if len(df) == 0:
-        st.warning("Dataset is empty. Model will not work properly.")
-    model = make_pipeline(TfidfVectorizer(), MultinomialNB())
-    model.fit(df['Transcription'], df['Action'])
-else:
-    st.warning("Dataset not found. Using fallback (intent detection may fail).")
-    model = None
-
-# --- 2. DATABASE SETUP ---
+# --- 3. DATABASE ---
 conn = sqlite3.connect("appointments.db", check_same_thread=False)
 c = conn.cursor()
 
 c.execute("""
 CREATE TABLE IF NOT EXISTS doctors (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    specialty TEXT
+    name TEXT
 )
 """)
+
 c.execute("""
 CREATE TABLE IF NOT EXISTS appointments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     patient_name TEXT,
     doctor_id INTEGER,
     date TEXT,
-    time TEXT,
-    FOREIGN KEY (doctor_id) REFERENCES doctors(id)
+    time TEXT
 )
 """)
+
 conn.commit()
 
-# Add sample doctors if table empty
+# Add doctors
 if c.execute("SELECT COUNT(*) FROM doctors").fetchone()[0] == 0:
-    c.executemany("INSERT INTO doctors (name, specialty) VALUES (?, ?)",
-                  [("Dr. Ahmed", "General"),
-                   ("Dr. Sara", "Dermatology"),
-                   ("Dr. Khalid", "Cardiology")])
+    c.executemany("INSERT INTO doctors (name) VALUES (?)",
+                  [("Dr. Ahmed",), ("Dr. Sara",), ("Dr. Khalid",)])
     conn.commit()
 
-# --- 3. SESSION STATE ---
+# --- 4. STATE ---
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "stage" not in st.session_state:
     st.session_state.stage = "start"
-if "appointment_data" not in st.session_state:
-    st.session_state.appointment_data = {}
+if "data" not in st.session_state:
+    st.session_state.data = {}
 
-# Display chat history
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+# Show chat history
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
 
-# --- 4. HELPER FUNCTIONS ---
-def get_intent_and_confidence(text):
+# --- 5. FUNCTIONS ---
+def get_intent(text):
     if model:
-        try:
-            probs = model.predict_proba([text])[0]
-            confidence = max(probs)
-            intent = model.classes_[probs.argmax()]
-        except Exception:
-            # fallback if predict_proba fails
-            intent = model.predict([text])[0]
-            confidence = 1.0
-    else:
-        intent = "General"
-        confidence = 1.0
-    return intent, confidence
+        return model.predict([text])[0]
+    return "General"
 
 def extract_datetime(text):
-    dt = dateparser.parse(text, languages=["en", "ar"])
-    return dt
+    return dateparser.parse(text, languages=["en", "ar"])
 
-def available_doctors(date, time):
-    booked_ids = [row[0] for row in c.execute(
+def get_available_doctor(date, time):
+    booked = [r[0] for r in c.execute(
         "SELECT doctor_id FROM appointments WHERE date=? AND time=?", (date, time)
     ).fetchall()]
-    all_doctors = c.execute("SELECT id, name FROM doctors").fetchall()
-    free_docs = [(doc_id, name) for doc_id, name in all_doctors if doc_id not in booked_ids]
-    return free_docs
 
-# --- 5. CHAT INPUT HANDLER ---
-if prompt := st.chat_input("How can I help you today?"):
+    doctors = c.execute("SELECT id, name FROM doctors").fetchall()
+
+    for doc_id, name in doctors:
+        if doc_id not in booked:
+            return doc_id, name
+    return None, None
+
+# --- 6. CHAT ---
+if prompt := st.chat_input("Type here..."):
     st.chat_message("user").markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
 
-    intent, confidence = get_intent_and_confidence(prompt)
+    intent = get_intent(prompt)
 
-    # CONTINUE FLOW IF MID-APPOINTMENT
+    # 🔥 CONTINUE FLOW FIRST
     if st.session_state.stage != "start":
 
-        if st.session_state.stage == "get_name":
-            st.session_state.appointment_data["patient_name"] = prompt
-            response = "Great. What date would you like for your appointment?"
-            st.session_state.stage = "get_date"
+        if st.session_state.stage == "name":
+            st.session_state.data["name"] = prompt
+            st.session_state.stage = "date"
+            response = "What date?"
 
-        elif st.session_state.stage == "get_date":
+        elif st.session_state.stage == "date":
             dt = extract_datetime(prompt)
             if dt:
-                st.session_state.appointment_data["date"] = dt.strftime("%Y-%m-%d")
-                response = "Got it. What time works best for you?"
-                st.session_state.stage = "get_time"
+                st.session_state.data["date"] = dt.strftime("%Y-%m-%d")
+                st.session_state.stage = "time"
+                response = "What time?"
             else:
-                response = "I couldn’t understand the date. Please say something like 'tomorrow' or 'March 25' (English or Arabic)."
+                response = "Please give a valid date (e.g. tomorrow)."
 
-        elif st.session_state.stage == "get_time":
+        elif st.session_state.stage == "time":
             dt = extract_datetime(prompt)
             if dt:
-                st.session_state.appointment_data["time"] = dt.strftime("%H:%M")
-                date = st.session_state.appointment_data["date"]
-                time = st.session_state.appointment_data["time"]
-                free_docs = available_doctors(date, time)
-                if free_docs:
-                    doc_id, doc_name = free_docs[0]
-                    st.session_state.appointment_data["doctor_id"] = doc_id
-                    c.execute("INSERT INTO appointments (patient_name, doctor_id, date, time) VALUES (?, ?, ?, ?)",
-                              (st.session_state.appointment_data["patient_name"], doc_id, date, time))
+                st.session_state.data["time"] = dt.strftime("%H:%M")
+
+                d = st.session_state.data
+                doc_id, doc_name = get_available_doctor(d["date"], d["time"])
+
+                if doc_id:
+                    c.execute(
+                        "INSERT INTO appointments (patient_name, doctor_id, date, time) VALUES (?, ?, ?, ?)",
+                        (d["name"], doc_id, d["date"], d["time"])
+                    )
                     conn.commit()
+
                     response = f"""
 ✅ Appointment Confirmed!
 
-👤 Patient: {st.session_state.appointment_data['patient_name']}  
-👨‍⚕️ Doctor: {doc_name}  
-📅 Date: {date}  
-⏰ Time: {time}  
-
-Anything else I can help with?
+👤 {d['name']}  
+👨‍⚕️ {doc_name}  
+📅 {d['date']}  
+⏰ {d['time']}
 """
                     st.session_state.stage = "start"
-                    st.session_state.appointment_data = {}
+                    st.session_state.data = {}
                 else:
-                    response = "Sorry, no doctors are available at that date and time. Please choose another slot."
+                    response = "No doctors available. Choose another time."
             else:
-                response = "Please provide a valid time like '5 PM' or '14:30'."
+                response = "Please give a valid time."
 
-    # START NEW FLOW
+    # 🔥 START FLOW
     else:
-        if confidence < 0.6:
-            response = "I’m not sure I understood. Do you want to book, reschedule, or ask something else?"
-
-        elif "Appointment" in intent:
-            response = "Sure! Let's book your appointment. What's your name?"
-            st.session_state.stage = "get_name"
+        if "Appointment" in intent or "book" in prompt.lower():
+            st.session_state.stage = "name"
+            response = "Let's book. What's your name?"
 
         elif "Reschedule" in intent:
-            response = "Sure, I can help reschedule your appointment. Please provide your booking ID."
+            response = "Rescheduling not implemented yet."
 
         else:
-            response = "I can help with booking, rescheduling, or general questions. What do you need?"
+            response = "I can help with booking. Try saying 'book appointment'."
 
+    # Display response
     with st.chat_message("assistant"):
         st.markdown(response)
+
     st.session_state.messages.append({"role": "assistant", "content": response})
