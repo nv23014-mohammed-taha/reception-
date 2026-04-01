@@ -1,12 +1,35 @@
-# --- 3. PREDICTION + SMART RESPONSE SYSTEM ---
-
+# reception_app.py
+import pandas as pd
+import os
+import glob
+import streamlit as st
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.pipeline import make_pipeline
+import kagglehub
 import dateparser
 
-def get_intent_and_confidence(text):
-    probs = model.predict_proba([text])[0]
-    confidence = max(probs)
-    intent = model.classes_[probs.argmax()]
-    return intent, confidence
+# --- 1. DATA & MODEL SETUP ---
+path = kagglehub.dataset_download("ammarshafiq/healthcare-appointment-booking-calls-dataset")
+
+csv_files = glob.glob(os.path.join(path, "*.csv"))
+
+if csv_files:
+    df = pd.read_csv(csv_files[0])
+    df = df[['Transcription', 'Action']].dropna()
+
+    model = make_pipeline(TfidfVectorizer(), MultinomialNB())
+    model.fit(df['Transcription'], df['Action'])
+else:
+    st.error("Dataset not found.")
+
+# --- 2. CHAT INTERFACE (STREAMLIT) ---
+st.title("🤖 AI Healthcare Receptionist")
+st.markdown("This prototype uses a **local NLP model** trained on clinical call data.")
+
+# Initialize chat history
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
 # Conversation state
 if "stage" not in st.session_state:
@@ -14,19 +37,30 @@ if "stage" not in st.session_state:
 if "appointment_data" not in st.session_state:
     st.session_state.appointment_data = {}
 
-# Helper: extract date/time automatically
+# Display previous messages
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# --- HELPER FUNCTIONS ---
+def get_intent_and_confidence(text):
+    probs = model.predict_proba([text])[0]
+    confidence = max(probs)
+    intent = model.classes_[probs.argmax()]
+    return intent, confidence
+
 def extract_datetime(text):
     dt = dateparser.parse(text)
     return dt
 
-# React to user input
+# --- 3. REACT TO USER INPUT ---
 if prompt := st.chat_input("How can I help you today?"):
     st.chat_message("user").markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
 
     intent, confidence = get_intent_and_confidence(prompt)
 
-    # 🔥 PRIORITY: CONTINUE FLOW (ignore intent if mid-process)
+    # PRIORITY: Continue appointment flow if mid-process
     if st.session_state.stage != "start":
 
         if st.session_state.stage == "get_name":
@@ -47,7 +81,6 @@ if prompt := st.chat_input("How can I help you today?"):
             dt = extract_datetime(prompt)
             if dt:
                 st.session_state.appointment_data["time"] = dt.strftime("%H:%M")
-
                 data = st.session_state.appointment_data
                 response = f"""
 ✅ Appointment Confirmed!
@@ -63,7 +96,7 @@ You're all set. Anything else I can help with?
             else:
                 response = "Please provide a valid time like '5 PM' or '14:30'."
 
-    # --- START NEW FLOW ---
+    # START NEW FLOW
     else:
         if confidence < 0.6:
             response = "I'm not fully sure I understood. Do you want to book, reschedule, or ask something else?"
@@ -81,5 +114,4 @@ You're all set. Anything else I can help with?
     # Display assistant response
     with st.chat_message("assistant"):
         st.markdown(response)
-
     st.session_state.messages.append({"role": "assistant", "content": response})
