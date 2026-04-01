@@ -3,3 +3,4 @@ streamlit
 scikit-learn
 kagglehub
 dateparser
+json
