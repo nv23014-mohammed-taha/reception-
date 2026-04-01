@@ -1,3 +1,5 @@
-streamlit>=1.25
+streamlit>=1.30
+pandas
 dateparser
-mistral-sdk
+python-dotenv
+git+https://github.com/mistralai/mistral-sdk.git
