@@ -4,7 +4,8 @@ import streamlit as st
 import sqlite3
 import dateparser
 import json
-from mistralai.client import MistralClient
+from mistral_sdk import MistralClient
+
 
 # --- SETUP ---
 st.title("🤖 AI Healthcare Receptionist (Smart AI Version)")
