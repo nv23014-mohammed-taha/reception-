@@ -1,4 +1,5 @@
-# final_receptionist.py
+# final_receptionist_json.py
+
 import pandas as pd
 import os
 import streamlit as st
@@ -7,37 +8,54 @@ from sklearn.naive_bayes import MultinomialNB
 from sklearn.pipeline import make_pipeline
 import dateparser
 import sqlite3
-import zipfile
+import json
 
-# --- 1. UI ---
+# --- UI ---
 st.title("🤖 AI Healthcare Receptionist")
-st.markdown("Supports booking with English & Arabic dates.")
 
-# --- 2. LOAD DATA FROM ZIP ONLY ---
-dataset_zip = "healthcare-appointment-booking-calls-dataset.zip"
+# --- LOAD JSON DATA ---
+json_path = "archive (8).json"   # ← your file name
 
 model = None
 
-if os.path.exists(dataset_zip):
-    with zipfile.ZipFile(dataset_zip, 'r') as zip_ref:
-        csv_files = [f for f in zip_ref.namelist() if f.endswith(".csv")]
-        if csv_files:
-            with zip_ref.open(csv_files[0]) as f:
-                df = pd.read_csv(f)
-                df = df[['Transcription', 'Action']].dropna()
+if os.path.exists(json_path):
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
 
-                if len(df) > 0:
-                    model = make_pipeline(TfidfVectorizer(), MultinomialNB())
-                    model.fit(df['Transcription'], df['Action'])
-                    st.success("✅ Model loaded successfully!")
-                else:
-                    st.error("Dataset is empty.")
+        df = pd.DataFrame(data)
+
+        # 🔥 AUTO-DETECT COLUMNS
+        text_col = None
+        label_col = None
+
+        for col in df.columns:
+            if "text" in col.lower() or "transcription" in col.lower():
+                text_col = col
+            if "action" in col.lower() or "label" in col.lower():
+                label_col = col
+
+        if text_col and label_col:
+            df = df[[text_col, label_col]].dropna()
+            df.columns = ["text", "label"]
+
+            if len(df) > 0:
+                model = make_pipeline(TfidfVectorizer(), MultinomialNB())
+                model.fit(df["text"], df["label"])
+                st.success("✅ Model trained from JSON!")
+            else:
+                st.error("Dataset is empty.")
         else:
-            st.error("No CSV found in ZIP.")
-else:
-    st.error("ZIP file not found.")
+            st.warning("⚠️ Could not detect columns automatically. Using fallback mode.")
+            model = None
 
-# --- 3. DATABASE ---
+    except Exception as e:
+        st.error(f"Error loading JSON: {e}")
+        model = None
+else:
+    st.error("JSON file not found.")
+
+# --- DATABASE ---
 conn = sqlite3.connect("appointments.db", check_same_thread=False)
 c = conn.cursor()
 
@@ -60,13 +78,13 @@ CREATE TABLE IF NOT EXISTS appointments (
 
 conn.commit()
 
-# Add doctors
+# Insert doctors
 if c.execute("SELECT COUNT(*) FROM doctors").fetchone()[0] == 0:
     c.executemany("INSERT INTO doctors (name) VALUES (?)",
                   [("Dr. Ahmed",), ("Dr. Sara",), ("Dr. Khalid",)])
     conn.commit()
 
-# --- 4. STATE ---
+# --- STATE ---
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "stage" not in st.session_state:
@@ -74,15 +92,27 @@ if "stage" not in st.session_state:
 if "data" not in st.session_state:
     st.session_state.data = {}
 
-# Show chat history
+# Display chat history
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# --- 5. FUNCTIONS ---
+# --- FUNCTIONS ---
 def get_intent(text):
+    # 🔥 fallback keywords ALWAYS WORK
+    text_lower = text.lower()
+
+    if "book" in text_lower or "appointment" in text_lower:
+        return "Appointment"
+    if "reschedule" in text_lower:
+        return "Reschedule"
+
     if model:
-        return model.predict([text])[0]
+        try:
+            return model.predict([text])[0]
+        except:
+            return "General"
+
     return "General"
 
 def extract_datetime(text):
@@ -90,7 +120,8 @@ def extract_datetime(text):
 
 def get_available_doctor(date, time):
     booked = [r[0] for r in c.execute(
-        "SELECT doctor_id FROM appointments WHERE date=? AND time=?", (date, time)
+        "SELECT doctor_id FROM appointments WHERE date=? AND time=?",
+        (date, time)
     ).fetchall()]
 
     doctors = c.execute("SELECT id, name FROM doctors").fetchall()
@@ -98,22 +129,23 @@ def get_available_doctor(date, time):
     for doc_id, name in doctors:
         if doc_id not in booked:
             return doc_id, name
+
     return None, None
 
-# --- 6. CHAT ---
+# --- CHAT ---
 if prompt := st.chat_input("Type here..."):
     st.chat_message("user").markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
 
     intent = get_intent(prompt)
 
-    # 🔥 CONTINUE FLOW FIRST
+    # 🔥 CONTINUE FLOW
     if st.session_state.stage != "start":
 
         if st.session_state.stage == "name":
             st.session_state.data["name"] = prompt
             st.session_state.stage = "date"
-            response = "What date?"
+            response = "What date would you like?"
 
         elif st.session_state.stage == "date":
             dt = extract_datetime(prompt)
@@ -122,7 +154,7 @@ if prompt := st.chat_input("Type here..."):
                 st.session_state.stage = "time"
                 response = "What time?"
             else:
-                response = "Please give a valid date (e.g. tomorrow)."
+                response = "Please enter a valid date (e.g. tomorrow)."
 
         elif st.session_state.stage == "time":
             dt = extract_datetime(prompt)
@@ -150,23 +182,22 @@ if prompt := st.chat_input("Type here..."):
                     st.session_state.stage = "start"
                     st.session_state.data = {}
                 else:
-                    response = "No doctors available. Choose another time."
+                    response = "No doctors available. Try another time."
             else:
-                response = "Please give a valid time."
+                response = "Please enter a valid time."
 
     # 🔥 START FLOW
     else:
-        if "Appointment" in intent or "book" in prompt.lower():
+        if intent == "Appointment":
             st.session_state.stage = "name"
-            response = "Let's book. What's your name?"
+            response = "Let's book your appointment. What's your name?"
 
-        elif "Reschedule" in intent:
+        elif intent == "Reschedule":
             response = "Rescheduling not implemented yet."
 
         else:
             response = "I can help with booking. Try saying 'book appointment'."
 
-    # Display response
     with st.chat_message("assistant"):
         st.markdown(response)
 
