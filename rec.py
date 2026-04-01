@@ -1,64 +1,83 @@
-from mistralai import Mistral, UserMessage, SystemMessage
+import streamlit as st
 import sqlite3
-import dateparser
-import os
-from dotenv import load_dotenv
+from mistralai.client import MistralClient
+from mistralai.models.chat_completion import ChatMessage
+from datetime import datetime
 
-load_dotenv()
-client = Mistral(api_key=os.getenv("MISTRAL_API_KEY"))
+# --- CONFIGURATION ---
+MISTRAL_API_KEY = "your_api_key_here"  # Replace with your key
+client = MistralClient(api_key=MISTRAL_API_KEY)
 
-# --- DATABASE ---
-conn = sqlite3.connect("appointments.db")
-c = conn.cursor()
-c.execute("CREATE TABLE IF NOT EXISTS doctors (id INTEGER PRIMARY KEY, name TEXT)")
-c.execute("""CREATE TABLE IF NOT EXISTS appointments (
-    id INTEGER PRIMARY KEY,
-    patient_name TEXT,
-    doctor_name TEXT,
-    date TEXT,
-    time TEXT)""")
-conn.commit()
-c.executemany("INSERT OR IGNORE INTO doctors (id, name) VALUES (?, ?)",
-              [(1, "Dr. Ahmed"), (2, "Dr. Sara"), (3, "Dr. Khalid")])
-conn.commit()
-
-# --- Tools ---
-def doctor_availability_tool(patient_name, doctor_name, date, time):
-    # check availability
-    booked = c.execute(
-        "SELECT * FROM appointments WHERE doctor_name=? AND date=? AND time=?",
-        (doctor_name, date, time)
-    ).fetchone()
-    if booked:
-        return f"{doctor_name} is not available at {date} {time}."
-    c.execute(
-        "INSERT INTO appointments (patient_name, doctor_name, date, time) VALUES (?, ?, ?, ?)",
-        (patient_name, doctor_name, date, time)
-    )
+# --- DATABASE SETUP ---
+def init_db():
+    conn = sqlite3.connect('hospital.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS appointments 
+                 (id INTEGER PRIMARY KEY, patient_name TEXT, doctor_name TEXT, date TEXT)''')
+    # Pre-populate doctors if needed
+    doctors = ["Dr. Smith (Cardiology)", "Dr. Laila (Pediatrics)", "Dr. Omar (General)"]
     conn.commit()
-    return f"✅ Appointment booked for {patient_name} with {doctor_name} on {date} at {time}."
+    conn.close()
+    return doctors
 
-# --- Receptionist Agent ---
-agent = client.beta.agents.create(
-    model="mistral-medium-latest",
-    name="Healthcare Receptionist",
-    description="Handles appointments for doctors in a clinic",
-    instructions="""
-You are a smart healthcare receptionist. Extract patient name, doctor, date, and time from user input. 
-Use the doctor_availability_tool to check availability and book appointments. 
-Respond in friendly natural language.
-""",
-    tools=[{"type": "custom", "name": "doctor_availability_tool"}]
-)
+doctors_list = init_db()
 
-# --- Start conversation ---
-while True:
-    user_input = input("User: ")
-    if user_input.lower() in ["quit", "exit"]:
-        break
+# --- STREAMLIT UI ---
+st.set_page_config(page_title="AI Medical Receptionist", page_icon="🏥")
+st.title("🏥 Smart Healthcare Receptionist")
+st.markdown("---")
 
-    response = client.beta.conversations.start(
-        agent_id=agent.id,
-        inputs=user_input
-    )
-    print("Receptionist:", response.outputs[0].content)
+# Sidebar for Admin View
+with st.sidebar:
+    st.header("Admin: Today's Bookings")
+    conn = sqlite3.connect('hospital.db')
+    bookings = conn.execute("SELECT * FROM appointments").fetchall()
+    for b in bookings:
+        st.write(f"📌 {b[1]} with {b[2]} on {b[3]}")
+    conn.close()
+
+# Initialize Chat History
+if "messages" not in st.session_state:
+    st.session_state.messages = [
+        {"role": "assistant", "content": "Hello! I am your medical assistant. How can I help you book an appointment today? \n\n مرحباً! أنا مساعدك الطبي. كيف يمكنني مساعدتك في حجز موعد اليوم؟"}
+    ]
+
+# Display Chat
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+# --- CHAT LOGIC ---
+if prompt := st.chat_input("Type here..."):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    # Prepare context for Mistral
+    system_instruction = f"""
+    You are a helpful medical receptionist. 
+    Available Doctors: {', '.join(doctors_list)}.
+    Your task:
+    1. Identify the patient's name, doctor choice, and date.
+    2. If information is missing, ask for it politely in the language the user used (English or Arabic).
+    3. Once you have Name, Doctor, and Date, confirm the booking clearly.
+    """
+    
+    mistral_msgs = [ChatMessage(role="system", content=system_instruction)] + \
+                   [ChatMessage(role=m["role"], content=m["content"]) for m in st.session_state.messages]
+
+    with st.chat_message("assistant"):
+        response_stream = client.chat_stream(model="mistral-large-latest", messages=mistral_msgs)
+        placeholder = st.empty()
+        full_response = ""
+        
+        for chunk in response_stream:
+            full_response += chunk.choices[0].delta.content or ""
+            placeholder.markdown(full_response + "▌")
+        placeholder.markdown(full_response)
+
+    st.session_state.messages.append({"role": "assistant", "content": full_response})
+
+    # --- SIMPLE EXTRACTION (Concept) ---
+    # In a production app, you would use Mistral's 'Tool Use' / Function Calling 
+    # to automatically trigger the database insert here.
