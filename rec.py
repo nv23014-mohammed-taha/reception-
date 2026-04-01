@@ -9,7 +9,31 @@ from sklearn.pipeline import make_pipeline
 import kagglehub
 import dateparser
 import sqlite3
+import zipfile
 
+dataset_zip = "healthcare-appointment-booking-calls-dataset.zip"
+
+if os.path.exists(dataset_zip):
+    with zipfile.ZipFile(dataset_zip, 'r') as zip_ref:
+        csv_files = [f for f in zip_ref.namelist() if f.endswith(".csv")]
+        if csv_files:
+            with zip_ref.open(csv_files[0]) as f:
+                df = pd.read_csv(f)
+                df = df[['Transcription', 'Action']].dropna()
+                if len(df) == 0:
+                    st.warning("Dataset is empty. Using fallback.")
+                    model = None
+                else:
+                    # Train the model
+                    model = make_pipeline(TfidfVectorizer(), MultinomialNB())
+                    model.fit(df['Transcription'], df['Action'])
+                    st.success("Dataset loaded. NLP model ready!")
+        else:
+            st.warning("No CSV found in ZIP. Using fallback.")
+            model = None
+else:
+    st.warning("ZIP dataset not found. Using fallback.")
+    model = None
 # --- 1. DATA & MODEL SETUP ---
 st.title("🤖 AI Healthcare Receptionist")
 st.markdown("Local NLP model trained on clinical call data. Supports Arabic & English dates.")
