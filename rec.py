@@ -1,12 +1,15 @@
 import streamlit as st
 import sqlite3
-from mistralai.client import MistralClient
 from mistralai.models.chat_completion import ChatMessage
 from datetime import datetime
+# NEW VERSION (v2.x)
+from mistralai import Mistral
 
-# --- CONFIGURATION ---
-MISTRAL_API_KEY = "your_api_key_here"  # Replace with your key
-client = MistralClient(api_key=MISTRAL_API_KEY)
+# Note the change to 'Mistral' and the use of 'api_key' argument
+client = Mistral(api_key="ORN8aRA54fNrTef0wJtgz768alJlPYJ5")
+
+# When sending messages, you can now use simple dictionaries 
+# or the new 'UserMessage' / 'SystemMessage' classes.
 
 # --- DATABASE SETUP ---
 def init_db():
