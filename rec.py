@@ -1,4 +1,4 @@
-# final_receptionist_json.py
+# final_receptionist_zip_safe.py
 
 import pandas as pd
 import os
@@ -8,77 +8,85 @@ from sklearn.naive_bayes import MultinomialNB
 from sklearn.pipeline import make_pipeline
 import dateparser
 import sqlite3
+import zipfile
 import json
 
-# --- UI ---
 st.title("🤖 AI Healthcare Receptionist")
 
-# --- LOAD JSON DATA ---
-json_path = "archive (8).json"   # ← your file name
+dataset_zip = "archive (8).zip"  # your file
 
 model = None
 
-if os.path.exists(json_path):
+# --- SAFE ZIP LOADING ---
+if os.path.exists(dataset_zip):
     try:
-        with open(json_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        with zipfile.ZipFile(dataset_zip, 'r') as zip_ref:
+            file_list = zip_ref.namelist()
 
-        df = pd.DataFrame(data)
+            json_files = [f for f in file_list if f.endswith(".json")]
+            csv_files = [f for f in file_list if f.endswith(".csv")]
 
-        # 🔥 AUTO-DETECT COLUMNS
-        text_col = None
-        label_col = None
+            # 🔥 PRIORITY: JSON
+            if json_files:
+                with zip_ref.open(json_files[0]) as f:
+                    data = json.load(f)
+                    df = pd.DataFrame(data)
 
-        for col in df.columns:
-            if "text" in col.lower() or "transcription" in col.lower():
-                text_col = col
-            if "action" in col.lower() or "label" in col.lower():
-                label_col = col
+            elif csv_files:
+                with zip_ref.open(csv_files[0]) as f:
+                    df = pd.read_csv(f)
 
-        if text_col and label_col:
-            df = df[[text_col, label_col]].dropna()
-            df.columns = ["text", "label"]
-
-            if len(df) > 0:
-                model = make_pipeline(TfidfVectorizer(), MultinomialNB())
-                model.fit(df["text"], df["label"])
-                st.success("✅ Model trained from JSON!")
             else:
-                st.error("Dataset is empty.")
-        else:
-            st.warning("⚠️ Could not detect columns automatically. Using fallback mode.")
-            model = None
+                st.error("No valid data file inside ZIP.")
+                df = None
 
-    except Exception as e:
-        st.error(f"Error loading JSON: {e}")
+            if df is not None:
+                # AUTO DETECT COLUMNS
+                text_col = None
+                label_col = None
+
+                for col in df.columns:
+                    if "text" in col.lower() or "transcription" in col.lower():
+                        text_col = col
+                    if "action" in col.lower() or "label" in col.lower():
+                        label_col = col
+
+                if text_col and label_col:
+                    df = df[[text_col, label_col]].dropna()
+                    df.columns = ["text", "label"]
+
+                    model = make_pipeline(TfidfVectorizer(), MultinomialNB())
+                    model.fit(df["text"], df["label"])
+
+                    st.success("✅ Model trained from ZIP!")
+                else:
+                    st.warning("Could not detect columns.")
+            else:
+                model = None
+
+    except zipfile.BadZipFile:
+        st.error("❌ ZIP file is corrupted or invalid.")
         model = None
+
 else:
-    st.error("JSON file not found.")
+    st.error("ZIP file not found.")
 
 # --- DATABASE ---
 conn = sqlite3.connect("appointments.db", check_same_thread=False)
 c = conn.cursor()
 
-c.execute("""
-CREATE TABLE IF NOT EXISTS doctors (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT
-)
-""")
-
+c.execute("CREATE TABLE IF NOT EXISTS doctors (id INTEGER PRIMARY KEY, name TEXT)")
 c.execute("""
 CREATE TABLE IF NOT EXISTS appointments (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    patient_name TEXT,
-    doctor_id INTEGER,
-    date TEXT,
-    time TEXT
-)
+id INTEGER PRIMARY KEY,
+patient_name TEXT,
+doctor_id INTEGER,
+date TEXT,
+time TEXT)
 """)
 
 conn.commit()
 
-# Insert doctors
 if c.execute("SELECT COUNT(*) FROM doctors").fetchone()[0] == 0:
     c.executemany("INSERT INTO doctors (name) VALUES (?)",
                   [("Dr. Ahmed",), ("Dr. Sara",), ("Dr. Khalid",)])
@@ -92,19 +100,18 @@ if "stage" not in st.session_state:
 if "data" not in st.session_state:
     st.session_state.data = {}
 
-# Display chat history
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
 # --- FUNCTIONS ---
 def get_intent(text):
-    # 🔥 fallback keywords ALWAYS WORK
-    text_lower = text.lower()
+    t = text.lower()
 
-    if "book" in text_lower or "appointment" in text_lower:
+    # 🔥 ALWAYS WORK fallback
+    if "book" in t or "appointment" in t:
         return "Appointment"
-    if "reschedule" in text_lower:
+    if "reschedule" in t:
         return "Reschedule"
 
     if model:
@@ -121,8 +128,7 @@ def extract_datetime(text):
 def get_available_doctor(date, time):
     booked = [r[0] for r in c.execute(
         "SELECT doctor_id FROM appointments WHERE date=? AND time=?",
-        (date, time)
-    ).fetchall()]
+        (date, time)).fetchall()]
 
     doctors = c.execute("SELECT id, name FROM doctors").fetchall()
 
@@ -139,13 +145,12 @@ if prompt := st.chat_input("Type here..."):
 
     intent = get_intent(prompt)
 
-    # 🔥 CONTINUE FLOW
     if st.session_state.stage != "start":
 
         if st.session_state.stage == "name":
             st.session_state.data["name"] = prompt
             st.session_state.stage = "date"
-            response = "What date would you like?"
+            response = "What date?"
 
         elif st.session_state.stage == "date":
             dt = extract_datetime(prompt)
@@ -154,7 +159,7 @@ if prompt := st.chat_input("Type here..."):
                 st.session_state.stage = "time"
                 response = "What time?"
             else:
-                response = "Please enter a valid date (e.g. tomorrow)."
+                response = "Enter a valid date."
 
         elif st.session_state.stage == "time":
             dt = extract_datetime(prompt)
@@ -171,32 +176,22 @@ if prompt := st.chat_input("Type here..."):
                     )
                     conn.commit()
 
-                    response = f"""
-✅ Appointment Confirmed!
-
-👤 {d['name']}  
-👨‍⚕️ {doc_name}  
-📅 {d['date']}  
-⏰ {d['time']}
-"""
+                    response = f"✅ Booked with {doc_name} on {d['date']} at {d['time']}"
                     st.session_state.stage = "start"
                     st.session_state.data = {}
                 else:
-                    response = "No doctors available. Try another time."
-            else:
-                response = "Please enter a valid time."
+                    response = "No doctors available."
 
-    # 🔥 START FLOW
+            else:
+                response = "Enter a valid time."
+
     else:
         if intent == "Appointment":
             st.session_state.stage = "name"
-            response = "Let's book your appointment. What's your name?"
-
-        elif intent == "Reschedule":
-            response = "Rescheduling not implemented yet."
+            response = "What's your name?"
 
         else:
-            response = "I can help with booking. Try saying 'book appointment'."
+            response = "Say 'book appointment' to start."
 
     with st.chat_message("assistant"):
         st.markdown(response)
