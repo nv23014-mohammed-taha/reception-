@@ -1,6 +1,5 @@
-streamlit
+streamlit>=1.25.0
 pandas
-scikit-learn
 dateparser
-sqlite3  
+sqlite3  # built-in, no need to install
 mistral-sdk
