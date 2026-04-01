@@ -1,6 +1,6 @@
-streamlit
+streamlit>=1.25.0
 pandas
 scikit-learn
 dateparser
-mistralai
+sqlite3  # note: sqlite3 is built-in Python, no need to install
 mistral-sdk
