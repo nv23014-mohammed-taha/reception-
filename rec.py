@@ -4,7 +4,7 @@ import sqlite3
 
 # Initialize Client
 # Best practice: Use Streamlit secrets for your API Key
-api_key = st.secrets[ORN8aRA54fNrTef0wJtgz768alJlPYJ5]
+api_key = ORN8aRA54fNrTef0wJtgz768alJlPYJ5
 client = Mistral(api_key=api_key)
 
 st.title("🏥 AI Healthcare Receptionist")
