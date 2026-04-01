@@ -1,4 +1,4 @@
-# reception_app_db.py
+# robust_receptionist.py
 import pandas as pd
 import os
 import glob
@@ -11,22 +11,28 @@ import dateparser
 import sqlite3
 
 # --- 1. DATA & MODEL SETUP ---
+st.title("🤖 AI Healthcare Receptionist")
+st.markdown("Local NLP model trained on clinical call data. Supports Arabic & English dates.")
+
+# Download dataset from Kaggle
 path = kagglehub.dataset_download("ammarshafiq/healthcare-appointment-booking-calls-dataset")
 csv_files = glob.glob(os.path.join(path, "*.csv"))
 
 if csv_files:
     df = pd.read_csv(csv_files[0])
     df = df[['Transcription', 'Action']].dropna()
+    if len(df) == 0:
+        st.warning("Dataset is empty. Model will not work properly.")
     model = make_pipeline(TfidfVectorizer(), MultinomialNB())
     model.fit(df['Transcription'], df['Action'])
 else:
-    st.error("Dataset not found.")
+    st.warning("Dataset not found. Using fallback (intent detection may fail).")
+    model = None
 
 # --- 2. DATABASE SETUP ---
-conn = sqlite3.connect("appointments.db")
+conn = sqlite3.connect("appointments.db", check_same_thread=False)
 c = conn.cursor()
 
-# Create tables if they don't exist
 c.execute("""
 CREATE TABLE IF NOT EXISTS doctors (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,16 +52,15 @@ CREATE TABLE IF NOT EXISTS appointments (
 """)
 conn.commit()
 
-# Add some dummy doctors if table is empty
+# Add sample doctors if table empty
 if c.execute("SELECT COUNT(*) FROM doctors").fetchone()[0] == 0:
     c.executemany("INSERT INTO doctors (name, specialty) VALUES (?, ?)",
-                  [("Dr. Ahmed", "General"), ("Dr. Sara", "Dermatology"), ("Dr. Khalid", "Cardiology")])
+                  [("Dr. Ahmed", "General"),
+                   ("Dr. Sara", "Dermatology"),
+                   ("Dr. Khalid", "Cardiology")])
     conn.commit()
 
-# --- 3. STREAMLIT UI ---
-st.title("🤖 AI Healthcare Receptionist")
-st.markdown("This prototype uses a **local NLP model** trained on clinical call data.")
-
+# --- 3. SESSION STATE ---
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "stage" not in st.session_state:
@@ -63,19 +68,28 @@ if "stage" not in st.session_state:
 if "appointment_data" not in st.session_state:
     st.session_state.appointment_data = {}
 
+# Display chat history
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
 # --- 4. HELPER FUNCTIONS ---
 def get_intent_and_confidence(text):
-    probs = model.predict_proba([text])[0]
-    confidence = max(probs)
-    intent = model.classes_[probs.argmax()]
+    if model:
+        try:
+            probs = model.predict_proba([text])[0]
+            confidence = max(probs)
+            intent = model.classes_[probs.argmax()]
+        except Exception:
+            # fallback if predict_proba fails
+            intent = model.predict([text])[0]
+            confidence = 1.0
+    else:
+        intent = "General"
+        confidence = 1.0
     return intent, confidence
 
 def extract_datetime(text):
-    # Parse English and Arabic dates automatically
     dt = dateparser.parse(text, languages=["en", "ar"])
     return dt
 
@@ -84,8 +98,8 @@ def available_doctors(date, time):
         "SELECT doctor_id FROM appointments WHERE date=? AND time=?", (date, time)
     ).fetchall()]
     all_doctors = c.execute("SELECT id, name FROM doctors").fetchall()
-    free_doctors = [(doc_id, name) for doc_id, name in all_doctors if doc_id not in booked_ids]
-    return free_doctors
+    free_docs = [(doc_id, name) for doc_id, name in all_doctors if doc_id not in booked_ids]
+    return free_docs
 
 # --- 5. CHAT INPUT HANDLER ---
 if prompt := st.chat_input("How can I help you today?"):
@@ -94,7 +108,7 @@ if prompt := st.chat_input("How can I help you today?"):
 
     intent, confidence = get_intent_and_confidence(prompt)
 
-    # CONTINUE FLOW IF MID-PROCESS
+    # CONTINUE FLOW IF MID-APPOINTMENT
     if st.session_state.stage != "start":
 
         if st.session_state.stage == "get_name":
@@ -109,7 +123,7 @@ if prompt := st.chat_input("How can I help you today?"):
                 response = "Got it. What time works best for you?"
                 st.session_state.stage = "get_time"
             else:
-                response = "I couldn’t understand the date. Please try 'tomorrow' or 'March 25' (English or Arabic)."
+                response = "I couldn’t understand the date. Please say something like 'tomorrow' or 'March 25' (English or Arabic)."
 
         elif st.session_state.stage == "get_time":
             dt = extract_datetime(prompt)
