@@ -1,11 +1,15 @@
 import streamlit as st
-from mistralai.client import Mistral  # <--- Corrected Import
-import sqlite3
+from mistralai.client import Mistral
 
-# Initialize Client
-# Best practice: Use Streamlit secrets for your API Key
-api_key = 
-client = Mistral(api_key=api_key)
+# This line tells the app: "Go look in the Settings > Secrets for MISTRAL_API_KEY"
+try:
+    api_key = st.secrets["MISTRAL_API_KEY"]
+    client = Mistral(api_key=api_key)
+except KeyError:
+    st.error("API Key not found! Please add it to the Streamlit Secrets settings.")
+    st.stop()
+
+# ... rest of your medical receptionist code ...
 
 st.title("🏥 AI Healthcare Receptionist")
 
