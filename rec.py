@@ -1,9 +1,8 @@
 import streamlit as st
 import sqlite3
-from mistralai.models.chat_completion import ChatMessage
 from datetime import datetime
-# NEW VERSION (v2.x)
 from mistralai import Mistral
+
 
 # Note the change to 'Mistral' and the use of 'api_key' argument
 client = Mistral(api_key="ORN8aRA54fNrTef0wJtgz768alJlPYJ5")
