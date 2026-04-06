@@ -5,7 +5,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 
 # --- 1. CONFIG & MISTRAL SETUP ---
-st.set_page_config(page_title="Clinic", layout="wide")
+st.set_page_config(page_title="NCST AI Clinic", layout="wide", page_icon="🏥")
 
 # Accessing the API Key safely from Streamlit Secrets
 if "MISTRAL_API_KEY" in st.secrets:
@@ -21,7 +21,6 @@ def init_db():
     """Initializes the database with a Unique Constraint to prevent double-booking."""
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     c = conn.cursor()
-    # The 'UNIQUE(doc_id, slot)' is the hard-wall that stops two people booking the same time.
     c.execute('''CREATE TABLE IF NOT EXISTS appointments 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   patient_name TEXT, 
@@ -33,33 +32,23 @@ def init_db():
 
 def check_and_book(patient_name, doc_id, requested_slot):
     """Uses a 'BEGIN IMMEDIATE' transaction to lock the database during the check/write phase."""
-    # timeout=10 allows other users to wait in line for 10 seconds if the DB is busy
     conn = sqlite3.connect(DB_FILE, check_same_thread=False, timeout=10)
     c = conn.cursor()
-    
     try:
-        # STEP 1: Lock the database for writing immediately
         c.execute("BEGIN IMMEDIATE")
-        
-        # STEP 2: Check if slot is taken inside the lock
         c.execute("SELECT id FROM appointments WHERE doc_id=? AND slot=?", (doc_id, requested_slot))
         
         if c.fetchone():
-            # Slot is taken! Suggest the next available hour
             dt_obj = datetime.strptime(requested_slot, "%Y-%m-%d %H:%M")
             alt_slot = (dt_obj + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")
-            conn.rollback() # Release the lock
+            conn.rollback()
             return False, alt_slot
         
-        # STEP 3: Safe to insert because we still hold the lock
         c.execute("INSERT INTO appointments (patient_name, doc_id, slot) VALUES (?,?,?)", 
                   (patient_name, doc_id, requested_slot))
-        
-        conn.commit() # Save and unlock
+        conn.commit()
         return True, None
-        
     except sqlite3.IntegrityError:
-        # Final safety catch if the UNIQUE constraint is triggered
         conn.rollback()
         return False, "This slot was just taken by another patient!"
     except Exception as e:
@@ -68,7 +57,6 @@ def check_and_book(patient_name, doc_id, requested_slot):
     finally:
         conn.close()
 
-# Initialize the DB on startup
 init_db()
 
 # --- 3. DOCTOR DIRECTORY ---
@@ -91,6 +79,14 @@ tab_chat, tab_dash = st.tabs(["💬 Patient Chat", "📊 Admin Dashboard"])
 # --- TAB 1: CHAT INTERFACE ---
 with tab_chat:
     st.title("🏥 NCST Smart AI Receptionist")
+
+    # --- NEW: LIVE CONTEXT INJECTION ---
+    # This fetches current bookings to tell the AI what is taken
+    conn = sqlite3.connect(DB_FILE)
+    current_bookings = pd.read_sql_query("SELECT doc_id, slot FROM appointments", conn)
+    conn.close()
+    
+    booked_list = current_bookings.to_string(index=False) if not current_bookings.empty else "None"
     
     if "messages" not in st.session_state:
         st.session_state.messages = []
@@ -104,13 +100,16 @@ with tab_chat:
         with st.chat_message("user"): 
             st.markdown(prompt)
 
+        # Updated System Prompt with LIVE data
         sys_prompt = f"""
         You are a medical receptionist for NCST AI Clinic. 
         Available Doctors: {DOCTORS}. 
-        Help patients book appointments. When they confirm a doctor and a time, 
-        you MUST end your response with exactly this tag: 
-        [BOOKING: Name, DoctorID, YYYY-MM-DD HH:MM]
-        Example: [BOOKING: Ahmed Ali, 1, 2026-05-15 10:00]
+
+        CRITICAL: The following slots are ALREADY BOOKED. Do NOT confirm these:
+        {booked_list}
+
+        If a patient asks for a booked slot, tell them it's taken and suggest the next hour.
+        When they confirm a valid time, end with: [BOOKING: Name, DoctorID, YYYY-MM-DD HH:MM]
         """
         
         with st.chat_message("assistant"):
@@ -122,7 +121,6 @@ with tab_chat:
                 msg = response.choices[0].message.content
                 st.markdown(msg)
                 
-                # Logic to catch the booking tag
                 if "[BOOKING:" in msg:
                     try:
                         raw_data = msg.split("[BOOKING:")[1].split("]")[0]
@@ -133,10 +131,10 @@ with tab_chat:
                             success, alt = check_and_book(p_name, d_id, p_time)
                             
                             if success:
-                                st.success(f"✅ Appointment confirmed for {p_name}!")
+                                st.success(f"✅ Appointment saved for {p_name}!")
                                 st.balloons()
                             else:
-                                st.warning(f"❌ Slot Unavailable. Suggested alternate: {alt}")
+                                st.warning(f"❌ That slot is already in the database. Suggested: {alt}")
                     except Exception as e:
                         st.error(f"Error parsing booking: {e}")
                 
@@ -154,8 +152,6 @@ with tab_dash:
 
     if not df.empty:
         st.metric("Total Appointments", len(df))
-        
-        # Grouping by Doctor for a professional layout
         for d_id, d_info in DOCTORS.items():
             doc_df = df[df['doc_id'] == d_id]
             with st.expander(f"{d_info['en']} - ({len(doc_df)} Patients)"):
