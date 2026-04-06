@@ -7,11 +7,13 @@ import os
 
 st.set_page_config(page_title="Clinic page", layout="wide")
 
+# language toggle
+lang = st.sidebar.selectbox("language / اللغة", ["English", "العربية"])
+
 # database file
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_NAME = os.path.join(BASE_DIR, 'hospital_management.db')
 
-# api key check
 if "MISTRAL_API_KEY" in st.secrets:
     mistral_client = Mistral(api_key=st.secrets["MISTRAL_API_KEY"])
 else:
@@ -25,7 +27,6 @@ def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    # create table if not exists
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS appointments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -39,16 +40,12 @@ def init_db():
     conn.commit()
     conn.close()
 
-# booking function
 def try_booking(name, doc, slot):
     conn = get_db_connection()
     cursor = conn.cursor()
 
     try:
-        # sometimes name comes weird so just cleaning it
         name = name.replace("Patient:", "").strip()
-
-        # had duplicate booking issue before so using this
         cursor.execute("BEGIN IMMEDIATE")
 
         cursor.execute("SELECT id FROM appointments WHERE doc_id=? AND slot=?", (doc, slot))
@@ -68,16 +65,12 @@ def try_booking(name, doc, slot):
     finally:
         conn.close()
 
-# cancel booking
 def cancel_booking(name, doc):
     conn = get_db_connection()
     cursor = conn.cursor()
 
     try:
-        # just in case formatting is off
         name = name.replace("Patient:", "").strip()
-
-        # using LIKE because exact match wasnt always working
         cursor.execute("DELETE FROM appointments WHERE patient_name LIKE ? AND doc_id=?",
                        (f"%{name}%", doc))
 
@@ -92,34 +85,44 @@ def cancel_booking(name, doc):
 
 init_db()
 
+# doctor names bilingual
 DOCTOR_LIST = {
-    "1": {"en": "Dr. Faisal Al-Mahmood (Cardiology)"},
-    "2": {"en": "Dr. Mariam Al-Sayed (Pediatrics)"},
-    "3": {"en": "Dr. Yousef Al-Haddad (Orthopedics)"},
-    "4": {"en": "Dr. Noura Al-Khalifa (Dermatology)"},
-    "5": {"en": "Dr. Khalid Al-Fares (Plastic Surgery)"},
-    "6": {"en": "Dr. Sara Al-Ansari (OB-GYN)"},
-    "7": {"en": "Dr. Jasim Al-Ghanem (Urology)"},
-    "8": {"en": "Dr. Layla Al-Mulla (Neurology)"},
-    "9": {"en": "Dr. Hassan Ibrahim (Ophthalmology)"},
-    "10": {"en": "Dr. Ahmed Al-Aali (General Medicine)"}
+    "1": {"en": "Dr. Faisal Al-Mahmood (Cardiology)", "ar": "د. فيصل المحمود (القلب)"},
+    "2": {"en": "Dr. Mariam Al-Sayed (Pediatrics)", "ar": "د. مريم السيد (أطفال)"},
+    "3": {"en": "Dr. Yousef Al-Haddad (Orthopedics)", "ar": "د. يوسف الحداد (عظام)"},
+    "4": {"en": "Dr. Noura Al-Khalifa (Dermatology)", "ar": "د. نورة الخليفة (جلدية)"},
+    "5": {"en": "Dr. Khalid Al-Fares (Plastic Surgery)", "ar": "د. خالد الفارس (تجميل)"},
+    "6": {"en": "Dr. Sara Al-Ansari (OB-GYN)", "ar": "د. سارة الأنصاري (نساء وولادة)"},
+    "7": {"en": "Dr. Jasim Al-Ghanem (Urology)", "ar": "د. جاسم الغانم (مسالك)"},
+    "8": {"en": "Dr. Layla Al-Mulla (Neurology)", "ar": "د. ليلى الملا (أعصاب)"},
+    "9": {"en": "Dr. Hassan Ibrahim (Ophthalmology)", "ar": "د. حسن إبراهيم (عيون)"},
+    "10": {"en": "Dr. Ahmed Al-Aali (General Medicine)", "ar": "د. أحمد العالي (طب عام)"}
 }
 
-# sidebar stuff
-st.sidebar.title("tools")
+# UI text depending on language
+text = {
+    "title": "clinic assistant" if lang == "English" else "مساعد العيادة",
+    "input": "type here" if lang == "English" else "اكتب هنا",
+    "dashboard": "appointments" if lang == "English" else "المواعيد",
+    "clear": "clear all" if lang == "English" else "حذف الكل",
+    "empty": "no bookings yet" if lang == "English" else "لا توجد مواعيد",
+}
+
+# sidebar
+st.sidebar.title("tools" if lang == "English" else "أدوات")
 
 if os.path.exists(DB_NAME):
     with open(DB_NAME, "rb") as f:
         st.sidebar.download_button(
-            label="download db",
+            label="download db" if lang == "English" else "تحميل قاعدة البيانات",
             data=f,
             file_name="hospital_management.db"
         )
 
-chat_tab, admin_tab = st.tabs(["chat", "dashboard"])
+chat_tab, admin_tab = st.tabs(["chat", "dashboard"] if lang == "English" else ["الدردشة", "لوحة التحكم"])
 
 with chat_tab:
-    st.title("clinic assistant")
+    st.title(text["title"])
 
     current_date = datetime.now().strftime("%A, %B %d, %Y")
 
@@ -129,7 +132,6 @@ with chat_tab:
 
     schedule = booked_df.to_string(index=False) if not booked_df.empty else "none"
 
-    # sometimes streamlit resets so keeping this
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
 
@@ -137,7 +139,7 @@ with chat_tab:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    if user_input := st.chat_input("type here"):
+    if user_input := st.chat_input(text["input"]):
         st.session_state.chat_history.append({"role": "user", "content": user_input})
 
         with st.chat_message("user"):
@@ -145,12 +147,13 @@ with chat_tab:
 
         system_instruction = f"""
         you are a clinic receptionist
-        today: {current_date}
+        respond in {"Arabic" if lang == "العربية" else "English"}
 
+        today: {current_date}
         doctors: {DOCTOR_LIST}
         busy slots: {schedule}
 
-        use this format:
+        use:
         [BOOKING: Name, DocID, YYYY-MM-DD HH:MM]
         [CANCEL: Name, DocID]
         """
@@ -165,18 +168,16 @@ with chat_tab:
                 ai_response = response.choices[0].message.content
                 st.markdown(ai_response)
 
-                # cancel logic
                 if "[CANCEL:" in ai_response:
                     data = ai_response.split("[CANCEL:")[1].split("]")[0]
                     parts = [p.strip() for p in data.split(",")]
 
                     if len(parts) >= 2:
                         if cancel_booking(parts[0], parts[1]):
-                            st.error(f"removed {parts[0]}")
+                            st.error("removed" if lang == "English" else "تم الحذف")
                         else:
-                            st.warning("not found")
+                            st.warning("not found" if lang == "English" else "غير موجود")
 
-                # booking logic
                 if "[BOOKING:" in ai_response:
                     data = ai_response.split("[BOOKING:")[1].split("]")[0]
                     parts = [p.strip() for p in data.split(",")]
@@ -185,7 +186,7 @@ with chat_tab:
                         success, err = try_booking(parts[0], parts[1], parts[2])
 
                         if success:
-                            st.success("booking added")
+                            st.success("booking added" if lang == "English" else "تم الحجز")
                             st.balloons()
                         else:
                             st.warning(f"failed: {err}")
@@ -196,7 +197,7 @@ with chat_tab:
                 st.error(f"error: {err}")
 
 with admin_tab:
-    st.subheader("appointments")
+    st.subheader(text["dashboard"])
 
     conn = get_db_connection()
     data = pd.read_sql_query("SELECT * FROM appointments", conn)
@@ -207,12 +208,13 @@ with admin_tab:
 
         for id, info in DOCTOR_LIST.items():
             df = data[data['doc_id'] == id]
+            name = info["en"] if lang == "English" else info["ar"]
 
-            with st.expander(f"{info['en']} ({len(df)})"):
+            with st.expander(f"{name} ({len(df)})"):
                 if not df.empty:
                     st.table(df[['patient_name', 'slot']])
 
-        if st.button("clear all"):
+        if st.button(text["clear"]):
             conn = get_db_connection()
             conn.execute("DELETE FROM appointments")
             conn.commit()
@@ -220,4 +222,4 @@ with admin_tab:
             st.rerun()
 
     else:
-        st.info("no bookings yet")
+        st.info(text["empty"])
