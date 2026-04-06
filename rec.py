@@ -2,77 +2,91 @@ import streamlit as st
 from mistralai.client import Mistral
 import sqlite3
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 import os
 
 st.set_page_config(page_title="Clinic page", layout="wide")
 
-# --- DATABASE SETUP ---
+# database file
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_NAME = os.path.join(BASE_DIR, 'hospital_management.db')
 
+# api key check
 if "MISTRAL_API_KEY" in st.secrets:
     mistral_client = Mistral(api_key=st.secrets["MISTRAL_API_KEY"])
 else:
-    st.error("Hey, you forgot to add the MISTRAL_API_KEY to your secrets!")
+    st.error("missing api key")
     st.stop()
 
 def get_db_connection():
-    return sqlite3.connect(DB_NAME, check_same_thread=False, timeout=10)
+    return sqlite3.connect(DB_NAME, check_same_thread=False)
 
 def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
+
+    # create table if not exists
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS appointments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, 
-            patient_name TEXT, 
-            doc_id TEXT, 
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patient_name TEXT,
+            doc_id TEXT,
             slot TEXT,
             UNIQUE(doc_id, slot)
         )
     ''')
+
     conn.commit()
     conn.close()
 
-# --- IMPROVED DATABASE OPERATIONS ---
-def try_booking(name, doc_id, time_slot):
+# booking function
+def try_booking(name, doc, slot):
     conn = get_db_connection()
     cursor = conn.cursor()
+
     try:
-        # Clean data from AI
-        clean_name = name.replace("Patient:", "").strip()
+        # sometimes name comes weird so just cleaning it
+        name = name.replace("Patient:", "").strip()
+
+        # had duplicate booking issue before so using this
         cursor.execute("BEGIN IMMEDIATE")
-        cursor.execute("SELECT id FROM appointments WHERE doc_id=? AND slot=?", (doc_id, time_slot))
+
+        cursor.execute("SELECT id FROM appointments WHERE doc_id=? AND slot=?", (doc, slot))
         if cursor.fetchone():
-            return False, "This slot is already taken."
-        
-        cursor.execute("INSERT INTO appointments (patient_name, doc_id, slot) VALUES (?,?,?)", 
-                       (clean_name, doc_id, time_slot))
+            return False, "slot already taken"
+
+        cursor.execute("INSERT INTO appointments (patient_name, doc_id, slot) VALUES (?,?,?)",
+                       (name, doc, slot))
+
         conn.commit()
         return True, None
+
     except Exception as e:
         conn.rollback()
         return False, str(e)
+
     finally:
         conn.close()
 
-def cancel_booking(name, doc_id):
-    """Flexible delete that ignores 'Patient:' prefix and extra spaces."""
+# cancel booking
+def cancel_booking(name, doc):
     conn = get_db_connection()
     cursor = conn.cursor()
+
     try:
-        # Step 1: Clean the input from the AI
-        clean_name = name.replace("Patient:", "").strip()
-        
-        # Step 2: Delete using LIKE to be safer with matches
-        cursor.execute("DELETE FROM appointments WHERE patient_name LIKE ? AND doc_id = ?", 
-                       (f"%{clean_name}%", doc_id))
-        
+        # just in case formatting is off
+        name = name.replace("Patient:", "").strip()
+
+        # using LIKE because exact match wasnt always working
+        cursor.execute("DELETE FROM appointments WHERE patient_name LIKE ? AND doc_id=?",
+                       (f"%{name}%", doc))
+
         conn.commit()
         return cursor.rowcount > 0
-    except Exception:
+
+    except:
         return False
+
     finally:
         conn.close()
 
@@ -91,107 +105,119 @@ DOCTOR_LIST = {
     "10": {"en": "Dr. Ahmed Al-Aali (General Medicine)"}
 }
 
-# --- SIDEBAR ---
-st.sidebar.title("🛠️ Developer Tools")
+# sidebar stuff
+st.sidebar.title("tools")
+
 if os.path.exists(DB_NAME):
     with open(DB_NAME, "rb") as f:
         st.sidebar.download_button(
-            label="📥 Download Database (.db)",
+            label="download db",
             data=f,
-            file_name="hospital_management.db",
-            mime="application/octet-stream"
+            file_name="hospital_management.db"
         )
 
-chat_tab, admin_tab = st.tabs(["💬 Virtual Receptionist", "📊 Staff Dashboard"])
+chat_tab, admin_tab = st.tabs(["chat", "dashboard"])
 
 with chat_tab:
-    st.title("🏥 Clinic Virtual Assistant")
-    current_date_str = datetime.now().strftime("%A, %B %d, %Y")
+    st.title("clinic assistant")
+
+    current_date = datetime.now().strftime("%A, %B %d, %Y")
 
     conn = get_db_connection()
     booked_df = pd.read_sql_query("SELECT doc_id, slot FROM appointments", conn)
     conn.close()
-    live_schedule = booked_df.to_string(index=False) if not booked_df.empty else "No current bookings."
 
+    schedule = booked_df.to_string(index=False) if not booked_df.empty else "none"
+
+    # sometimes streamlit resets so keeping this
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
 
-    for message in st.session_state.chat_history:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+    for msg in st.session_state.chat_history:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
-    if user_input := st.chat_input("How can I help you?"):
+    if user_input := st.chat_input("type here"):
         st.session_state.chat_history.append({"role": "user", "content": user_input})
+
         with st.chat_message("user"):
             st.markdown(user_input)
 
-        # STRICT PROTOCOL: Telling the AI NOT to add extra words inside the brackets
         system_instruction = f"""
-        You are a receptionist at AI Clinic. 
-        TODAY: {current_date_str} (Year 2026).
-        Doctors: {DOCTOR_LIST}.
-        Busy Slots: {live_schedule}
+        you are a clinic receptionist
+        today: {current_date}
 
-        STRICT PROTOCOLS (Do not add extra text inside brackets):
-        1. BOOK: [BOOKING: Name, DocID, YYYY-MM-DD HH:MM]
-        2. CANCEL: [CANCEL: Name, DocID]
-        3. CHANGE: Use [CANCEL: Name, DocID] then [BOOKING: Name, DocID, NewTime]
+        doctors: {DOCTOR_LIST}
+        busy slots: {schedule}
+
+        use this format:
+        [BOOKING: Name, DocID, YYYY-MM-DD HH:MM]
+        [CANCEL: Name, DocID]
         """
-        
+
         with st.chat_message("assistant"):
             try:
                 response = mistral_client.chat.complete(
-                    model="mistral-large-latest", 
+                    model="mistral-large-latest",
                     messages=[{"role": "system", "content": system_instruction}] + st.session_state.chat_history
                 )
+
                 ai_response = response.choices[0].message.content
                 st.markdown(ai_response)
-                
-                # Logic for Cancellation
+
+                # cancel logic
                 if "[CANCEL:" in ai_response:
-                    data_str = ai_response.split("[CANCEL:")[1].split("]")[0]
-                    parts = [p.strip() for p in data_str.split(",")]
+                    data = ai_response.split("[CANCEL:")[1].split("]")[0]
+                    parts = [p.strip() for p in data.split(",")]
+
                     if len(parts) >= 2:
                         if cancel_booking(parts[0], parts[1]):
-                            st.error(f"SYSTEM: Appointment for {parts[0]} removed from database.")
+                            st.error(f"removed {parts[0]}")
                         else:
-                            st.warning(f"SYSTEM: Could not find '{parts[0]}' in the database to cancel.")
+                            st.warning("not found")
 
-                # Logic for Booking
+                # booking logic
                 if "[BOOKING:" in ai_response:
-                    data_str = ai_response.split("[BOOKING:")[1].split("]")[0]
-                    parts = [p.strip() for p in data_str.split(",")]
+                    data = ai_response.split("[BOOKING:")[1].split("]")[0]
+                    parts = [p.strip() for p in data.split(",")]
+
                     if len(parts) >= 3:
                         success, err = try_booking(parts[0], parts[1], parts[2])
+
                         if success:
-                            st.success(f"SYSTEM: {parts[0]} successfully added to the database.")
+                            st.success("booking added")
                             st.balloons()
                         else:
-                            st.warning(f"SYSTEM: Booking failed - {err}")
-                
+                            st.warning(f"failed: {err}")
+
                 st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
+
             except Exception as err:
-                st.error(f"API Error: {err}")
+                st.error(f"error: {err}")
 
 with admin_tab:
-    st.subheader("Live Appointment Schedule")
+    st.subheader("appointments")
+
     conn = get_db_connection()
-    all_data = pd.read_sql_query("SELECT * FROM appointments", conn)
+    data = pd.read_sql_query("SELECT * FROM appointments", conn)
     conn.close()
 
-    if not all_data.empty:
-        st.metric("Total Active Bookings", len(all_data))
+    if not data.empty:
+        st.metric("total bookings", len(data))
+
         for id, info in DOCTOR_LIST.items():
-            doc_filter = all_data[all_data['doc_id'] == id]
-            with st.expander(f"{info['en']} ({len(doc_filter)})"):
-                if not doc_filter.empty:
-                    st.table(doc_filter[['patient_name', 'slot']])
-        
-        if st.button("Clear All Records"):
+            df = data[data['doc_id'] == id]
+
+            with st.expander(f"{info['en']} ({len(df)})"):
+                if not df.empty:
+                    st.table(df[['patient_name', 'slot']])
+
+        if st.button("clear all"):
             conn = get_db_connection()
             conn.execute("DELETE FROM appointments")
             conn.commit()
             conn.close()
             st.rerun()
+
     else:
-        st.info("The schedule is currently empty.")
+        st.info("no bookings yet")
