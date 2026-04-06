@@ -7,10 +7,8 @@ import os
 
 st.set_page_config(page_title="Clinic page", layout="wide")
 
-# language toggle
 lang = st.sidebar.selectbox("language / اللغة", ["English", "العربية"])
 
-# database file
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_NAME = os.path.join(BASE_DIR, 'hospital_management.db')
 
@@ -85,7 +83,6 @@ def cancel_booking(name, doc):
 
 init_db()
 
-# doctor names bilingual
 DOCTOR_LIST = {
     "1": {"en": "Dr. Faisal Al-Mahmood (Cardiology)", "ar": "د. فيصل المحمود (القلب)"},
     "2": {"en": "Dr. Mariam Al-Sayed (Pediatrics)", "ar": "د. مريم السيد (أطفال)"},
@@ -99,7 +96,6 @@ DOCTOR_LIST = {
     "10": {"en": "Dr. Ahmed Al-Aali (General Medicine)", "ar": "د. أحمد العالي (طب عام)"}
 }
 
-# UI text depending on language
 text = {
     "title": "clinic assistant" if lang == "English" else "مساعد العيادة",
     "input": "type here" if lang == "English" else "اكتب هنا",
@@ -108,7 +104,6 @@ text = {
     "empty": "no bookings yet" if lang == "English" else "لا توجد مواعيد",
 }
 
-# sidebar
 st.sidebar.title("tools" if lang == "English" else "أدوات")
 
 if os.path.exists(DB_NAME):
