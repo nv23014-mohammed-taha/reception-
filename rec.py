@@ -1,80 +1,44 @@
 import streamlit as st
 from mistralai.client import Mistral
 from st_supabase_connection import SupabaseConnection
-from datetime import datetime, timedelta
+from datetime import datetime
+import pandas as pd
 
-# --- 1. CONFIG & STYLING ---
-st.set_page_config(page_title="NCST AI Clinic PRO", layout="wide", page_icon="🏥")
+# --- 1. INITIALIZE CONNECTIONS ---
+st.set_page_config(page_title="NCST Clinic Pro", layout="wide")
 
-# Professional UI Styling
-st.markdown("""
-    <style>
-    .stApp { background-color: #f8f9fa; }
-    .stChatFloatingInputContainer { background-color: #ffffff; }
-    </style>
-    """, unsafe_allow_html=True)
-
-# --- 2. SECURE CLIENT INITIALIZATION ---
 try:
-    # Connect to Supabase Cloud Database
-    conn = st.connection("supabase", type=SupabaseConnection)
-    # Connect to Mistral AI
+    # Connects using the secrets we defined above
+    st_supabase = st.connection("supabase", type=SupabaseConnection)
     client = Mistral(api_key=st.secrets["MISTRAL_API_KEY"])
 except Exception as e:
-    st.error(f"Configuration Error: {e}")
-    st.info("Ensure SUPABASE_URL, SUPABASE_KEY, and MISTRAL_API_KEY are in your Secrets.")
+    st.error("Connection Error: Check your secrets.toml file!")
     st.stop()
 
-# --- 3. DATABASE CONTROLLER (CRUD Operations) ---
-class ClinicDB:
-    @staticmethod
-    def get_appointments():
-        # Fetch data from the cloud
-        return conn.table("appointments").select("*").execute()
-
-    @staticmethod
-    def check_availability(doc_id, slot_str):
-        # Professional check for double-booking
-        response = conn.table("appointments") \
-            .select("*") \
-            .eq("doc_id", doc_id) \
-            .eq("slot", slot_str) \
-            .execute()
-        return len(response.data) == 0
-
-    @staticmethod
-    def create_appointment(name, doc_id, slot_str):
-        # Insert data into the cloud
-        data = {"patient_name": name, "doc_id": doc_id, "slot": slot_str}
-        return conn.table("appointments").insert(data).execute()
-
-    @staticmethod
-    def clear_all():
-        # Admin function to wipe records
-        return conn.table("appointments").delete().neq("id", 0).execute()
-
-# --- 4. CLINIC LOGIC & DOCTORS ---
+# --- 2. DOCTOR DIRECTORY ---
 DOCTORS = {
-    "1": {"name": "Dr. Faisal Al-Mahmood", "dept": "Cardiology"},
-    "2": {"name": "Dr. Mariam Al-Sayed", "dept": "Pediatrics"},
-    "3": {"name": "Dr. Yousef Al-Haddad", "dept": "Orthopedics"},
-    "10": {"name": "Dr. Ahmed Al-Aali", "dept": "General Medicine"}
+    "1": "Dr. Faisal (Cardiology)",
+    "2": "Dr. Mariam (Pediatrics)",
+    "3": "Dr. Yousef (Orthopedics)",
+    "10": "Dr. Ahmed (General)"
 }
 
-def validate_time(slot_str):
-    try:
-        dt = datetime.strptime(slot_str, "%Y-%m-%d %H:%M")
-        if dt.weekday() in [4, 5]: return False, "weekends (Fri-Sat)"
-        if not (8 <= dt.hour < 17): return False, "working hours (08:00-17:00)"
-        return True, dt
-    except:
-        return False, "format (YYYY-MM-DD HH:MM)"
+# --- 3. CORE LOGIC FUNCTIONS ---
+def is_slot_free(doc_id, slot):
+    """Check Supabase Cloud for existing bookings."""
+    res = st_supabase.table("appointments").select("*").eq("doc_id", doc_id).eq("slot", slot).execute()
+    return len(res.data) == 0
 
-# --- 5. UI NAVIGATION ---
-tab_chat, tab_admin = st.tabs(["💬 AI Patient Portal", "👨‍⚕️ Staff Dashboard"])
+def save_booking(name, doc_id, slot):
+    """Insert the booking into the cloud database."""
+    data = {"patient_name": name, "doc_id": doc_id, "slot": slot}
+    st_supabase.table("appointments").insert(data).execute()
+
+# --- 4. THE INTERFACE ---
+tab_chat, tab_admin = st.tabs(["💬 Patient Booking", "📊 Clinic Admin"])
 
 with tab_chat:
-    st.title("🏥 Smart Receptionist")
+    st.title("🏥 NCST Smart Receptionist")
     
     if "messages" not in st.session_state:
         st.session_state.messages = []
@@ -82,11 +46,12 @@ with tab_chat:
     for m in st.session_state.messages:
         with st.chat_message(m["role"]): st.markdown(m["content"])
 
-    if prompt := st.chat_input("How can I help you today?"):
+    if prompt := st.chat_input("I'd like to book an appointment..."):
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"): st.markdown(prompt)
 
-        sys_prompt = f"You are a medical receptionist. Doctors: {DOCTORS}. Clinic: Sun-Thu, 8am-5pm. Format: [BOOK: Name, DocID, YYYY-MM-DD HH:MM]"
+        # AI Instruction
+        sys_prompt = f"Medical receptionist. Doctors: {DOCTORS}. Sun-Thu 8-5. Confirm with: [BOOK: Name, DocID, YYYY-MM-DD HH:MM]"
         
         with st.chat_message("assistant"):
             response = client.chat.complete(model="mistral-large-latest", 
@@ -94,40 +59,32 @@ with tab_chat:
             msg = response.choices[0].message.content
             st.markdown(msg)
             
+            # Action logic if AI confirms booking
             if "[BOOK:" in msg:
                 try:
+                    # Extracting data from the AI tag
                     raw = msg.split("[BOOK:")[1].split("]")[0].split(",")
-                    name, d_id, t_str = [i.strip() for i in raw]
+                    p_name, d_id, p_slot = [i.strip() for i in raw]
                     
-                    is_valid, result = validate_time(t_str)
-                    if is_valid:
-                        if ClinicDB.check_availability(d_id, t_str):
-                            ClinicDB.create_appointment(name, d_id, t_str)
-                            st.success(f"✅ Confirmed for {name}!")
-                            st.balloons()
-                        else:
-                            st.warning("❌ This slot is already booked.")
+                    if is_slot_free(d_id, p_slot):
+                        save_booking(p_name, d_id, p_slot)
+                        st.success(f"Successfully booked {p_name} in the cloud!")
+                        st.balloons()
                     else:
-                        st.error(f"❌ Outside {result}")
+                        st.warning("That slot is already taken in our database!")
                 except Exception as e:
-                    st.error("Format error in booking.")
+                    st.error("Error parsing booking tag.")
 
             st.session_state.messages.append({"role": "assistant", "content": msg})
 
 with tab_admin:
-    st.title("📊 Clinic Operations")
-    data = ClinicDB.get_appointments()
+    st.title("👨‍⚕️ Management Dashboard")
+    # Fetch all data from Supabase
+    all_data = st_supabase.table("appointments").select("*").execute()
     
-    if data.data:
-        df = pd.DataFrame(data.data)
-        st.metric("Total Patients Today", len(df))
-        
-        # Professional Table View
-        df['Doctor'] = df['doc_id'].map(lambda x: DOCTORS.get(x, {}).get('name', 'N/A'))
-        st.dataframe(df[['patient_name', 'Doctor', 'slot']], use_container_width=True)
-        
-        if st.sidebar.button("🗑️ Reset Clinic Data"):
-            ClinicDB.clear_all()
-            st.rerun()
+    if all_data.data:
+        df = pd.DataFrame(all_data.data)
+        st.subheader("Current Appointments")
+        st.dataframe(df[['patient_name', 'doc_id', 'slot']], use_container_width=True)
     else:
-        st.info("No appointments currently in the cloud database.")
+        st.info("The database is currently empty.")
