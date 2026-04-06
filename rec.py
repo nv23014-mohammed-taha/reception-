@@ -1,50 +1,74 @@
-import streamlit as st
+=import streamlit as st
 from mistralai.client import Mistral
 import sqlite3
 import pandas as pd
 from datetime import datetime, timedelta
 
 # --- 1. CONFIG & MISTRAL SETUP ---
-st.set_page_config(page_title="NCST AI Clinic", layout="wide", page_icon="🏥")
+st.set_page_config(page_title="Clinic", layout="wide")
 
-# Accessing the API Key safely
+# Accessing the API Key safely from Streamlit Secrets
 if "MISTRAL_API_KEY" in st.secrets:
     client = Mistral(api_key=st.secrets["MISTRAL_API_KEY"])
 else:
     st.error("Missing MISTRAL_API_KEY in Streamlit Secrets!")
     st.stop()
 
-# --- 2. DATABASE ENGINE ---
+# --- 2. DATABASE ENGINE (With Race-Condition Protection) ---
+DB_FILE = 'hospital_management.db'
+
 def init_db():
-    conn = sqlite3.connect('hospital_management.db', check_same_thread=False)
+    """Initializes the database with a Unique Constraint to prevent double-booking."""
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     c = conn.cursor()
+    # The 'UNIQUE(doc_id, slot)' is the hard-wall that stops two people booking the same time.
     c.execute('''CREATE TABLE IF NOT EXISTS appointments 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, patient_name TEXT, doc_id TEXT, slot TEXT)''')
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                  patient_name TEXT, 
+                  doc_id TEXT, 
+                  slot TEXT,
+                  UNIQUE(doc_id, slot))''')
     conn.commit()
     conn.close()
 
 def check_and_book(patient_name, doc_id, requested_slot):
-    conn = sqlite3.connect('hospital_management.db', check_same_thread=False)
+    """Uses a 'BEGIN IMMEDIATE' transaction to lock the database during the check/write phase."""
+    # timeout=10 allows other users to wait in line for 10 seconds if the DB is busy
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False, timeout=10)
     c = conn.cursor()
     
-    # Check if slot is taken for that specific doctor
-    c.execute("SELECT * FROM appointments WHERE doc_id=? AND slot=?", (doc_id, requested_slot))
-    if c.fetchone():
-        try:
+    try:
+        # STEP 1: Lock the database for writing immediately
+        c.execute("BEGIN IMMEDIATE")
+        
+        # STEP 2: Check if slot is taken inside the lock
+        c.execute("SELECT id FROM appointments WHERE doc_id=? AND slot=?", (doc_id, requested_slot))
+        
+        if c.fetchone():
+            # Slot is taken! Suggest the next available hour
             dt_obj = datetime.strptime(requested_slot, "%Y-%m-%d %H:%M")
             alt_slot = (dt_obj + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")
-        except: 
-            alt_slot = "another time"
+            conn.rollback() # Release the lock
+            return False, alt_slot
+        
+        # STEP 3: Safe to insert because we still hold the lock
+        c.execute("INSERT INTO appointments (patient_name, doc_id, slot) VALUES (?,?,?)", 
+                  (patient_name, doc_id, requested_slot))
+        
+        conn.commit() # Save and unlock
+        return True, None
+        
+    except sqlite3.IntegrityError:
+        # Final safety catch if the UNIQUE constraint is triggered
+        conn.rollback()
+        return False, "This slot was just taken by another patient!"
+    except Exception as e:
+        conn.rollback()
+        return False, f"System Error: {e}"
+    finally:
         conn.close()
-        return False, alt_slot
-    
-    # Insert new record
-    c.execute("INSERT INTO appointments (patient_name, doc_id, slot) VALUES (?,?,?)", 
-              (patient_name, doc_id, requested_slot))
-    conn.commit()
-    conn.close()
-    return True, None
 
+# Initialize the DB on startup
 init_db()
 
 # --- 3. DOCTOR DIRECTORY ---
@@ -66,7 +90,7 @@ tab_chat, tab_dash = st.tabs(["💬 Patient Chat", "📊 Admin Dashboard"])
 
 # --- TAB 1: CHAT INTERFACE ---
 with tab_chat:
-    st.title("🏥 Smart AI Receptionist")
+    st.title("🏥 NCST Smart AI Receptionist")
     
     if "messages" not in st.session_state:
         st.session_state.messages = []
@@ -75,12 +99,11 @@ with tab_chat:
         with st.chat_message(m["role"]):
             st.markdown(m["content"])
 
-    if prompt := st.chat_input("How can I help?"):
+    if prompt := st.chat_input("How can I help you today?"):
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"): 
             st.markdown(prompt)
 
-        # Updated System Prompt for better formatting consistency
         sys_prompt = f"""
         You are a medical receptionist for NCST AI Clinic. 
         Available Doctors: {DOCTORS}. 
@@ -102,7 +125,6 @@ with tab_chat:
                 # Logic to catch the booking tag
                 if "[BOOKING:" in msg:
                     try:
-                        # Extract and clean the data
                         raw_data = msg.split("[BOOKING:")[1].split("]")[0]
                         data = [item.strip() for item in raw_data.split(",")]
                         
@@ -111,47 +133,46 @@ with tab_chat:
                             success, alt = check_and_book(p_name, d_id, p_time)
                             
                             if success:
-                                st.success(f"✅ Appointment saved for {p_name}!")
-                                st.rerun() # Refresh to update the Dashboard immediately
+                                st.success(f"✅ Appointment confirmed for {p_name}!")
+                                st.balloons()
                             else:
-                                st.warning(f"❌ That time is taken. Suggested: {alt}")
+                                st.warning(f"❌ Slot Unavailable. Suggested alternate: {alt}")
                     except Exception as e:
-                        st.error(f"Error processing booking data: {e}")
+                        st.error(f"Error parsing booking: {e}")
                 
                 st.session_state.messages.append({"role": "assistant", "content": msg})
             except Exception as e:
                 st.error(f"Mistral API Error: {e}")
 
-# --- TAB 2: INTEGRATED DASHBOARD ---
+# --- TAB 2: ADMIN DASHBOARD ---
 with tab_dash:
-    st.title("👨‍⚕️ Doctor Schedules")
+    st.title("👨‍⚕️ Management Dashboard")
     
-    conn = sqlite3.connect('hospital_management.db', check_same_thread=False)
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     df = pd.read_sql_query("SELECT * FROM appointments", conn)
     conn.close()
 
     if not df.empty:
         st.metric("Total Appointments", len(df))
         
-        # Grouping by Doctor for a cleaner look
+        # Grouping by Doctor for a professional layout
         for d_id, d_info in DOCTORS.items():
             doc_df = df[df['doc_id'] == d_id]
             with st.expander(f"{d_info['en']} - ({len(doc_df)} Patients)"):
                 if not doc_df.empty:
-                    # Clean up the display table
                     display_df = doc_df[['patient_name', 'slot']].rename(
                         columns={'patient_name':'Patient Name', 'slot':'Appointment Time'}
                     )
                     st.table(display_df)
                 else:
-                    st.write("No patients scheduled.")
+                    st.write("No appointments yet.")
         
         st.divider()
-        if st.button("🗑️ Clear All Records"):
-            conn = sqlite3.connect('hospital_management.db')
+        if st.button("🗑️ Reset Clinic Database"):
+            conn = sqlite3.connect(DB_FILE)
             conn.execute("DELETE FROM appointments")
             conn.commit()
             conn.close()
             st.rerun()
     else:
-        st.info("The clinic schedule is currently empty. Try booking an appointment in the chat!")
+        st.info("The schedule is currently clear.")
