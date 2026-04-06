@@ -13,7 +13,11 @@ else:
     st.stop()
 
 DB_NAME = 'hospital_management.db'
+import os
 
+# This finds the exact folder where your rec.py is located
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_NAME = os.path.join(BASE_DIR, 'hospital_management.db')
 
 def get_db_connection():
     """Helper to handle the connection with a timeout for concurrent users."""
