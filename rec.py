@@ -1,4 +1,4 @@
-=import streamlit as st
+import streamlit as st
 from mistralai.client import Mistral
 import sqlite3
 import pandas as pd
