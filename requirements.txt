@@ -1,5 +1,5 @@
-streamlit
-mistralai
-st-supabase-connection
+streamlit==1.32.0
+mistralai==1.0.0
+st-supabase-connection==0.1.0
+supabase==2.3.7
 pandas
-supabase
