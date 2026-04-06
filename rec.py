@@ -35,18 +35,20 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- DATABASE OPERATIONS ---
+# --- IMPROVED DATABASE OPERATIONS ---
 def try_booking(name, doc_id, time_slot):
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
+        # Clean data from AI
+        clean_name = name.replace("Patient:", "").strip()
         cursor.execute("BEGIN IMMEDIATE")
         cursor.execute("SELECT id FROM appointments WHERE doc_id=? AND slot=?", (doc_id, time_slot))
         if cursor.fetchone():
             return False, "This slot is already taken."
         
         cursor.execute("INSERT INTO appointments (patient_name, doc_id, slot) VALUES (?,?,?)", 
-                       (name, doc_id, time_slot))
+                       (clean_name, doc_id, time_slot))
         conn.commit()
         return True, None
     except Exception as e:
@@ -56,10 +58,17 @@ def try_booking(name, doc_id, time_slot):
         conn.close()
 
 def cancel_booking(name, doc_id):
+    """Flexible delete that ignores 'Patient:' prefix and extra spaces."""
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute("DELETE FROM appointments WHERE patient_name=? AND doc_id=?", (name, doc_id))
+        # Step 1: Clean the input from the AI
+        clean_name = name.replace("Patient:", "").strip()
+        
+        # Step 2: Delete using LIKE to be safer with matches
+        cursor.execute("DELETE FROM appointments WHERE patient_name LIKE ? AND doc_id = ?", 
+                       (f"%{clean_name}%", doc_id))
+        
         conn.commit()
         return cursor.rowcount > 0
     except Exception:
@@ -111,21 +120,22 @@ with chat_tab:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    if user_input := st.chat_input("I'd like to book, cancel, or change my appointment..."):
+    if user_input := st.chat_input("How can I help you?"):
         st.session_state.chat_history.append({"role": "user", "content": user_input})
         with st.chat_message("user"):
             st.markdown(user_input)
 
+        # STRICT PROTOCOL: Telling the AI NOT to add extra words inside the brackets
         system_instruction = f"""
         You are a receptionist at AI Clinic. 
-        TODAY: {current_date_str} (Year is 2026).
+        TODAY: {current_date_str} (Year 2026).
         Doctors: {DOCTOR_LIST}.
         Busy Slots: {live_schedule}
 
-        PROTOCOLS:
+        STRICT PROTOCOLS (Do not add extra text inside brackets):
         1. BOOK: [BOOKING: Name, DocID, YYYY-MM-DD HH:MM]
         2. CANCEL: [CANCEL: Name, DocID]
-        3. RESCHEDULE: Use [CANCEL: Name, DocID] first, then [BOOKING: Name, DocID, NewTime]
+        3. CHANGE: Use [CANCEL: Name, DocID] then [BOOKING: Name, DocID, NewTime]
         """
         
         with st.chat_message("assistant"):
@@ -137,25 +147,27 @@ with chat_tab:
                 ai_response = response.choices[0].message.content
                 st.markdown(ai_response)
                 
-                # Handle Cancellations
+                # Logic for Cancellation
                 if "[CANCEL:" in ai_response:
                     data_str = ai_response.split("[CANCEL:")[1].split("]")[0]
                     parts = [p.strip() for p in data_str.split(",")]
                     if len(parts) >= 2:
                         if cancel_booking(parts[0], parts[1]):
-                            st.error(f"Cancelled: Appointment for {parts[0]} removed.")
+                            st.error(f"SYSTEM: Appointment for {parts[0]} removed from database.")
+                        else:
+                            st.warning(f"SYSTEM: Could not find '{parts[0]}' in the database to cancel.")
 
-                # Handle Bookings
+                # Logic for Booking
                 if "[BOOKING:" in ai_response:
                     data_str = ai_response.split("[BOOKING:")[1].split("]")[0]
                     parts = [p.strip() for p in data_str.split(",")]
                     if len(parts) >= 3:
                         success, err = try_booking(parts[0], parts[1], parts[2])
                         if success:
-                            st.success(f"Confirmed: {parts[0]} at {parts[2]}")
+                            st.success(f"SYSTEM: {parts[0]} successfully added to the database.")
                             st.balloons()
                         else:
-                            st.warning(f"Error: {err}")
+                            st.warning(f"SYSTEM: Booking failed - {err}")
                 
                 st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
             except Exception as err:
