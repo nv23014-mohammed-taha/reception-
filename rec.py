@@ -14,10 +14,6 @@ DB_NAME = os.path.join(BASE_DIR, 'hospital_management.db')
 
 if "MISTRAL_API_KEY" in st.secrets:
     mistral_client = Mistral(api_key=st.secrets["MISTRAL_API_KEY"])
-else:
-    st.error("missing api key")
-    st.stop()
-
 def get_db_connection():
     return sqlite3.connect(DB_NAME, check_same_thread=False)
 
@@ -114,7 +110,9 @@ if os.path.exists(DB_NAME):
             file_name="hospital_management.db"
         )
 
-chat_tab, admin_tab = st.tabs(["chat", "dashboard"] if lang == "English" else ["الدردشة", "لوحة التحكم"])
+chat_tab, admin_tab = st.tabs(
+    ["chat", "dashboard"] if lang == "English" else ["الدردشة", "لوحة التحكم"]
+)
 
 with chat_tab:
     st.title(text["title"])
