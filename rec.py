@@ -7,22 +7,14 @@ from datetime import datetime, timedelta
 import os
 import re
 
-# Google Calendar
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
-import pickle
+st.set_page_config(page_title="Clinic page", layout="wide")
 
-st.set_page_config(page_title="Clinic System", layout="wide")
+lang = st.sidebar.selectbox("language / اللغة", ["English", "العربية"])
 
-# ================= LANGUAGE =================
-lang = st.sidebar.selectbox("Language / اللغة", ["English", "العربية"])
-
-# ================= PATH =================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_NAME = os.path.join(BASE_DIR, "hospital_management.db")
+DB_NAME = os.path.join(BASE_DIR, 'hospital_management.db')
 
-# ================= AI CLIENT =================
+# ================= MISTRAL =================
 mistral_client = None
 if "MISTRAL_API_KEY" in st.secrets:
     mistral_client = Mistral(api_key=st.secrets["MISTRAL_API_KEY"])
@@ -37,16 +29,16 @@ def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS appointments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        patient_name TEXT,
-        phone TEXT,
-        doc_id TEXT,
-        slot TEXT,
-        UNIQUE(doc_id, slot)
-    )
-    """)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS appointments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patient_name TEXT,
+            phone TEXT,
+            doc_id TEXT,
+            slot TEXT,
+            UNIQUE(doc_id, slot)
+        )
+    ''')
 
     conn.commit()
     conn.close()
@@ -56,18 +48,16 @@ def try_booking(name, phone, doc, slot):
     cursor = conn.cursor()
 
     try:
+        name = name.strip().lower()
         cursor.execute("BEGIN IMMEDIATE")
 
-        cursor.execute(
-            "SELECT id FROM appointments WHERE doc_id=? AND slot=?",
-            (doc, slot)
-        )
+        cursor.execute("SELECT id FROM appointments WHERE doc_id=? AND slot=?", (doc, slot))
         if cursor.fetchone():
-            return False, "Slot already taken"
+            return False, "slot already taken"
 
         cursor.execute(
             "INSERT INTO appointments (patient_name, phone, doc_id, slot) VALUES (?,?,?,?)",
-            (name.lower().strip(), phone, doc, slot)
+            (name, phone, doc, slot)
         )
 
         conn.commit()
@@ -84,29 +74,20 @@ def cancel_booking(name, doc):
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute(
-        "DELETE FROM appointments WHERE patient_name=? AND doc_id=?",
-        (name.lower().strip(), doc)
-    )
-
-    conn.commit()
-    deleted = cursor.rowcount > 0
-    conn.close()
-    return deleted
+    try:
+        name = name.strip().lower()
+        cursor.execute("DELETE FROM appointments WHERE patient_name=? AND doc_id=?", (name, doc))
+        conn.commit()
+        return cursor.rowcount > 0
+    except:
+        return False
+    finally:
+        conn.close()
 
 init_db()
 
-# ================= DOCTORS =================
-DOCTOR_LIST = {
-    "1": {"en": "Dr. Faisal (Cardiology)", "ar": "د. فيصل"},
-    "2": {"en": "Dr. Mariam (Pediatrics)", "ar": "د. مريم"},
-    "3": {"en": "Dr. Yousef (Orthopedics)", "ar": "د. يوسف"},
-    "4": {"en": "Dr. Noura (Dermatology)", "ar": "د. نورة"},
-    "5": {"en": "Dr. Khalid (Surgery)", "ar": "د. خالد"}
-}
-
 # ================= WHATSAPP =================
-def send_whatsapp(phone, name, doctor, slot, reminder=False):
+def send_whatsapp_confirmation(phone, name, doctor, slot, reminder=False):
     try:
         client = Client(
             st.secrets["TWILIO_ACCOUNT_SID"],
@@ -114,26 +95,26 @@ def send_whatsapp(phone, name, doctor, slot, reminder=False):
         )
 
         if lang == "العربية":
-            msg = f"""
-{'تذكير ⏰' if reminder else 'تم تأكيد الموعد ✅'}
+            message = f"""
+{'تذكير ⏰' if reminder else 'تم تأكيد موعدك ✅'}
 
-{name}
+مرحباً {name}
 
 👨‍⚕️ {doctor}
 📅 {slot}
 """
         else:
-            msg = f"""
-{'Reminder ⏰' if reminder else 'Appointment Confirmed ✅'}
+            message = f"""
+{'Reminder ⏰' if reminder else 'Your appointment is confirmed ✅'}
 
-{name}
+Hello {name}
 
 👨‍⚕️ {doctor}
 📅 {slot}
 """
 
         client.messages.create(
-            body=msg,
+            body=message,
             from_=st.secrets["TWILIO_WHATSAPP_NUMBER"],
             to=f"whatsapp:{phone}"
         )
@@ -143,159 +124,146 @@ def send_whatsapp(phone, name, doctor, slot, reminder=False):
     except Exception as e:
         return str(e)
 
-# ================= GOOGLE CALENDAR =================
-SCOPES = ["https://www.googleapis.com/auth/calendar"]
-
-def get_calendar_service():
-    creds = None
-
-    if os.path.exists("token.pickle"):
-        with open("token.pickle", "rb") as token:
-            creds = pickle.load(token)
-
-    if not creds or not creds.valid:
-        flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
-        creds = flow.run_local_server(port=0)
-
-        with open("token.pickle", "wb") as token:
-            pickle.dump(creds, token)
-
-    return build("calendar", "v3", credentials=creds)
-
-def create_event(name, doctor, slot):
-    try:
-        service = get_calendar_service()
-
-        start = datetime.strptime(slot, "%Y-%m-%d %H:%M")
-        end = start + timedelta(minutes=30)
-
-        event = {
-            "summary": f"Appointment: {name}",
-            "description": doctor,
-            "start": {"dateTime": start.isoformat(), "timeZone": "Asia/Bahrain"},
-            "end": {"dateTime": end.isoformat(), "timeZone": "Asia/Bahrain"},
-        }
-
-        service.events().insert(calendarId="primary", body=event).execute()
-        return True
-
-    except Exception as e:
-        return str(e)
-
 # ================= REMINDERS =================
 def send_reminders():
     conn = get_db_connection()
-    df = pd.read_sql_query("SELECT * FROM appointments", conn)
-    conn.close()
+    cursor = conn.cursor()
 
     now = datetime.now()
-    one_hour = now + timedelta(hours=1)
+    one_hour_later = now + timedelta(hours=1)
 
-    for _, row in df.iterrows():
+    cursor.execute("SELECT patient_name, phone, doc_id, slot FROM appointments")
+    rows = cursor.fetchall()
+
+    for name, phone, doc, slot in rows:
         try:
-            t = datetime.strptime(row["slot"], "%Y-%m-%d %H:%M")
+            appointment_time = datetime.strptime(slot, "%Y-%m-%d %H:%M")
 
-            if now <= t <= one_hour:
-                doctor = DOCTOR_LIST[row["doc_id"]]["en"]
-
-                send_whatsapp(
-                    row["phone"],
-                    row["patient_name"],
-                    doctor,
-                    row["slot"],
-                    reminder=True
-                )
+            if now <= appointment_time <= one_hour_later:
+                doctor_name = DOCTOR_LIST[doc]["en"]
+                send_whatsapp_confirmation(phone, name, doctor_name, slot, reminder=True)
         except:
             pass
 
-# run reminders once per session
-if "reminder_run" not in st.session_state:
-    send_reminders()
-    st.session_state.reminder_run = True
+    conn.close()
 
-# ================= UI =================
+if "last_reminder_check" not in st.session_state:
+    send_reminders()
+    st.session_state.last_reminder_check = datetime.now()
+
+# ================= DOCTORS =================
+DOCTOR_LIST = {
+    "1": {"en": "Dr. Faisal Al-Mahmood (Cardiology)", "ar": "د. فيصل المحمود (القلب)"},
+    "2": {"en": "Dr. Mariam Al-Sayed (Pediatrics)", "ar": "د. مريم السيد (أطفال)"},
+    "3": {"en": "Dr. Yousef Al-Haddad (Orthopedics)", "ar": "د. يوسف الحداد (عظام)"},
+    "4": {"en": "Dr. Noura Al-Khalifa (Dermatology)", "ar": "د. نورة الخليفة (جلدية)"},
+    "5": {"en": "Dr. Khalid Al-Fares (Plastic Surgery)", "ar": "د. خالد الفارس (تجميل)"},
+    "6": {"en": "Dr. Sara Al-Ansari (OB-GYN)", "ar": "د. سارة الأنصاري (نساء وولادة)"},
+    "7": {"en": "Dr. Jasim Al-Ghanem (Urology)", "ar": "د. جاسم الغانم (مسالك)"},
+    "8": {"en": "Dr. Layla Al-Mulla (Neurology)", "ar": "د. ليلى الملا (أعصاب)"},
+    "9": {"en": "Dr. Hassan Ibrahim (Ophthalmology)", "ar": "د. حسن إبراهيم (عيون)"},
+    "10": {"en": "Dr. Ahmed Al-Aali (General Medicine)", "ar": "د. أحمد العالي (طب عام)"}
+}
+
+# ================= SIDEBAR =================
+st.sidebar.title("Tools")
+
+if os.path.exists(DB_NAME):
+    with open(DB_NAME, "rb") as f:
+        st.sidebar.download_button(
+            label="Download DB",
+            data=f,
+            file_name="hospital_management.db"
+        )
+
+# ================= TABS =================
 chat_tab, admin_tab = st.tabs(["Chat", "Dashboard"])
 
 # ================= CHAT =================
 with chat_tab:
-    st.title("Clinic AI Assistant")
+    st.title("Clinic Assistant")
 
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
 
-    for m in st.session_state.chat_history:
-        with st.chat_message(m["role"]):
-            st.markdown(m["content"])
+    for msg in st.session_state.chat_history:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
-    if user := st.chat_input("Type here"):
-        st.session_state.chat_history.append({"role": "user", "content": user})
+    if user_input := st.chat_input("Type here"):
+        st.session_state.chat_history.append({"role": "user", "content": user_input})
 
-        system = f"""
+        with st.chat_message("assistant"):
+            system_instruction = f"""
 You are a clinic receptionist.
 
 Rules:
-- Always require phone number
-- Format:
+- ALWAYS ask for phone number before booking
+
+Format:
 [BOOKING: Name, Phone, DocID, YYYY-MM-DD HH:MM]
 [CANCEL: Name, DocID]
 
 Doctors: {DOCTOR_LIST}
 """
 
-        res = mistral_client.chat.complete(
-            model="mistral-large-latest",
-            messages=[{"role": "system", "content": system}] + st.session_state.chat_history
-        )
+            response = mistral_client.chat.complete(
+                model="mistral-large-latest",
+                messages=[{"role": "system", "content": system_instruction}] + st.session_state.chat_history
+            )
 
-        reply = res.choices[0].message.content
-        st.markdown(reply)
+            ai_response = response.choices[0].message.content
+            st.markdown(ai_response)
 
-        # BOOKING
-        b = re.search(r"\[BOOKING:(.*?)\]", reply)
-        if b:
-            name, phone, doc, slot = [x.strip() for x in b.group(1).split(",")]
+            # BOOKING
+            match = re.search(r"\[BOOKING:(.*?)\]", ai_response)
+            if match:
+                parts = [p.strip() for p in match.group(1).split(",")]
 
-            ok, err = try_booking(name, phone, doc, slot)
+                if len(parts) >= 4:
+                    name, phone, doc, slot = parts
 
-            if ok:
-                doctor = DOCTOR_LIST[doc]["en"]
+                    success, err = try_booking(name, phone, doc, slot)
 
-                send_whatsapp(phone, name, doctor, slot)
-                create_event(name, doctor, slot)
+                    if success:
+                        doctor_name = DOCTOR_LIST[doc]["en"]
+                        send_whatsapp_confirmation(phone, name, doctor_name, slot)
 
-                st.success("Booked + WhatsApp + Calendar ✅")
-                st.balloons()
-            else:
-                st.warning(err)
+                        st.success("Booked + WhatsApp sent ✅")
+                        st.balloons()
+                    else:
+                        st.warning(err)
 
-        # CANCEL
-        c = re.search(r"\[CANCEL:(.*?)\]", reply)
-        if c:
-            name, doc = [x.strip() for x in c.group(1).split(",")]
+            # CANCEL
+            match = re.search(r"\[CANCEL:(.*?)\]", ai_response)
+            if match:
+                parts = [p.strip() for p in match.group(1).split(",")]
+                if len(parts) >= 2:
+                    if cancel_booking(parts[0], parts[1]):
+                        st.success("Cancelled")
+                    else:
+                        st.warning("Not found")
 
-            if cancel_booking(name, doc):
-                st.success("Cancelled")
-            else:
-                st.warning("Not found")
-
-        st.session_state.chat_history.append({"role": "assistant", "content": reply})
+            st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
 
 # ================= DASHBOARD =================
 with admin_tab:
-    st.subheader("Dashboard")
+    st.subheader("Appointments Dashboard")
 
     conn = get_db_connection()
     df = pd.read_sql_query("SELECT * FROM appointments", conn)
     conn.close()
 
     if not df.empty:
-        st.metric("Total Appointments", len(df))
+        st.metric("Total Bookings", len(df))
 
-        for id, doc in DOCTOR_LIST.items():
-            sub = df[df["doc_id"] == id]
+        for id, info in DOCTOR_LIST.items():
+            doc_df = df[df["doc_id"] == id]
+            name = info["en"]
 
-            with st.expander(f"{doc['en']} ({len(sub)})"):
-                st.table(sub)
+            with st.expander(f"{name} ({len(doc_df)})"):
+                if not doc_df.empty:
+                    st.table(doc_df[["patient_name", "phone", "slot"]])
 
         if st.button("Clear All"):
             conn = get_db_connection()
@@ -304,11 +272,5 @@ with admin_tab:
             conn.close()
             st.rerun()
 
-        st.download_button(
-            "Download DB",
-            data=open(DB_NAME, "rb"),
-            file_name="clinic.db"
-        )
-
     else:
-        st.info("No appointments yet")
+        st.info("No bookings yet")
