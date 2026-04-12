@@ -275,52 +275,40 @@ with admin_tab:
     else:
         st.info("No bookings yet")
 
-from datetime import datetime, timedelta
-
-# ================= TIME VALIDATION =================
 def is_valid_future_time(slot):
     try:
         appointment_time = datetime.strptime(slot, "%Y-%m-%d %H:%M")
-        now = datetime.now()
-
-        # must be strictly in the future
-        return appointment_time > now
+        return appointment_time > datetime.now()
     except:
         return False
 
 
-# ================= SMART SUGGESTIONS =================
 def suggest_alternative_times(slot):
     try:
         base = datetime.strptime(slot, "%Y-%m-%d %H:%M")
 
-        suggestions = [
-            base + timedelta(minutes=30),
-            base + timedelta(hours=1),
-            base + timedelta(hours=2)
+        return [
+            (base + timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M"),
+            (base + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M"),
+            (base + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M"),
         ]
-
-        return [t.strftime("%Y-%m-%d %H:%M") for t in suggestions]
-
     except:
         return []
 
 
-# ================= UPDATED BOOKING FUNCTION =================
 def try_booking(name, phone, doc, slot):
     conn = get_db_connection()
     cursor = conn.cursor()
 
     try:
         name = name.strip().lower()
-
         cursor.execute("BEGIN IMMEDIATE")
 
-        # ❌ 1. BLOCK PAST / INVALID TIME
+        # 🚫 BLOCK PAST / CURRENT TIME
         if not is_valid_future_time(slot):
             return False, "You cannot book past or current time slots."
 
-        # ❌ 2. CHECK SLOT AVAILABILITY
+        # 🚫 SLOT CHECK
         cursor.execute(
             "SELECT id FROM appointments WHERE doc_id=? AND slot=?",
             (doc, slot)
@@ -328,10 +316,9 @@ def try_booking(name, phone, doc, slot):
 
         if cursor.fetchone():
             suggestions = suggest_alternative_times(slot)
+            return False, "Slot taken. Try: " + ", ".join(suggestions)
 
-            return False, "Slot already taken. Try: " + ", ".join(suggestions)
-
-        # ✅ 3. INSERT BOOKING
+        # ✅ INSERT
         cursor.execute(
             "INSERT INTO appointments (patient_name, phone, doc_id, slot) VALUES (?,?,?,?)",
             (name, phone, doc, slot)
