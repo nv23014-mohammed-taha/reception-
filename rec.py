@@ -4,6 +4,7 @@ import sqlite3
 import pandas as pd
 from datetime import datetime
 import os
+import urllib.parse  # For encoding the WhatsApp message
 
 st.set_page_config(page_title="Clinic page", layout="wide")
 
@@ -14,66 +15,70 @@ DB_NAME = os.path.join(BASE_DIR, 'hospital_management.db')
 
 if "MISTRAL_API_KEY" in st.secrets:
     mistral_client = Mistral(api_key=st.secrets["MISTRAL_API_KEY"])
+
 def get_db_connection():
     return sqlite3.connect(DB_NAME, check_same_thread=False)
 
 def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
-
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS appointments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             patient_name TEXT,
             doc_id TEXT,
             slot TEXT,
+            phone TEXT,
             UNIQUE(doc_id, slot)
         )
     ''')
-
     conn.commit()
     conn.close()
 
-def try_booking(name, doc, slot):
+# --- THE EASY WHATSAPP AUTOMATION ---
+def show_whatsapp_button(phone, message):
+    encoded_msg = urllib.parse.quote(message)
+    # Clean the phone number (remove spaces/plus signs for the URL)
+    clean_phone = "".join(filter(str.isdigit, phone))
+    url = f"https://wa.me/{clean_phone}?text={encoded_msg}"
+    
+    st.markdown(f"""
+        <div style="text-align: center; margin-top: 10px;">
+            <a href="{url}" target="_blank">
+                <button style="background-color: #25D366; color: white; border: none; padding: 12px 24px; border-radius: 8px; font-weight: bold; cursor: pointer; width: 100%;">
+                    📲 Send WhatsApp Confirmation
+                </button>
+            </a>
+        </div>
+    """, unsafe_allow_html=True)
+
+def try_booking(name, doc, slot, phone):
     conn = get_db_connection()
     cursor = conn.cursor()
-
     try:
         name = name.replace("Patient:", "").strip()
-        cursor.execute("BEGIN IMMEDIATE")
-
-        cursor.execute("SELECT id FROM appointments WHERE doc_id=? AND slot=?", (doc, slot))
-        if cursor.fetchone():
-            return False, "slot already taken"
-
-        cursor.execute("INSERT INTO appointments (patient_name, doc_id, slot) VALUES (?,?,?)",
-                       (name, doc, slot))
-
+        cursor.execute("INSERT INTO appointments (patient_name, doc_id, slot, phone) VALUES (?,?,?,?)",
+                       (name, doc, slot, phone))
         conn.commit()
         return True, None
-
     except Exception as e:
-        conn.rollback()
         return False, str(e)
-
     finally:
         conn.close()
 
 def cancel_booking(name, doc):
     conn = get_db_connection()
     cursor = conn.cursor()
-
     try:
         name = name.replace("Patient:", "").strip()
-        cursor.execute("DELETE FROM appointments WHERE patient_name LIKE ? AND doc_id=?",
-                       (f"%{name}%", doc))
-
+        # Fixed: Use exact match or LIKE to clear the ghost data
+        cursor.execute("DELETE FROM appointments WHERE (patient_name LIKE ? OR patient_name = ?) AND doc_id=?",
+                       (f"%{name}%", name, doc))
+        rows = cursor.rowcount
         conn.commit()
-        return cursor.rowcount > 0
-
+        return rows > 0
     except:
         return False
-
     finally:
         conn.close()
 
@@ -93,36 +98,22 @@ DOCTOR_LIST = {
 }
 
 text = {
-    "title": "clinic assistant" if lang == "English" else "مساعد العيادة",
-    "input": "type here" if lang == "English" else "اكتب هنا",
-    "dashboard": "appointments" if lang == "English" else "المواعيد",
-    "clear": "clear all" if lang == "English" else "حذف الكل",
-    "empty": "no bookings yet" if lang == "English" else "لا توجد مواعيد",
+    "title": "Clinic Assistant" if lang == "English" else "مساعد العيادة",
+    "input": "Type here..." if lang == "English" else "اكتب هنا...",
+    "dashboard": "Appointments" if lang == "English" else "المواعيد",
+    "clear": "Clear All" if lang == "English" else "حذف الكل",
+    "empty": "No bookings yet" if lang == "English" else "لا توجد مواعيد",
 }
 
-st.sidebar.title("tools" if lang == "English" else "أدوات")
-
-if os.path.exists(DB_NAME):
-    with open(DB_NAME, "rb") as f:
-        st.sidebar.download_button(
-            label="download db" if lang == "English" else "تحميل قاعدة البيانات",
-            data=f,
-            file_name="hospital_management.db"
-        )
-
-chat_tab, admin_tab = st.tabs(
-    ["chat", "dashboard"] if lang == "English" else ["الدردشة", "لوحة التحكم"]
-)
+chat_tab, admin_tab = st.tabs(["Chat", "Dashboard"] if lang == "English" else ["الدردشة", "لوحة التحكم"])
 
 with chat_tab:
     st.title(text["title"])
-
     current_date = datetime.now().strftime("%A, %B %d, %Y")
 
     conn = get_db_connection()
     booked_df = pd.read_sql_query("SELECT doc_id, slot FROM appointments", conn)
     conn.close()
-
     schedule = booked_df.to_string(index=False) if not booked_df.empty else "none"
 
     if "chat_history" not in st.session_state:
@@ -134,21 +125,19 @@ with chat_tab:
 
     if user_input := st.chat_input(text["input"]):
         st.session_state.chat_history.append({"role": "user", "content": user_input})
-
         with st.chat_message("user"):
             st.markdown(user_input)
 
         system_instruction = f"""
-        you are a clinic receptionist
-        respond in {"Arabic" if lang == "العربية" else "English"}
-
-        today: {current_date}
+        you are a clinic receptionist. Respond in {"Arabic" if lang == "العربية" else "English"}
+        today: {current_date} (Year 2026)
         doctors: {DOCTOR_LIST}
         busy slots: {schedule}
 
-        use:
-        [BOOKING: Name, DocID, YYYY-MM-DD HH:MM]
-        [CANCEL: Name, DocID]
+        MANDATORY: 
+        1. If booking, you MUST ask for the patient's Name AND Phone number.
+        2. use: [BOOKING: Name, DocID, YYYY-MM-DD HH:MM, Phone]
+        3. use: [CANCEL: Name, DocID]
         """
 
         with st.chat_message("assistant"):
@@ -157,55 +146,48 @@ with chat_tab:
                     model="mistral-large-latest",
                     messages=[{"role": "system", "content": system_instruction}] + st.session_state.chat_history
                 )
-
                 ai_response = response.choices[0].message.content
                 st.markdown(ai_response)
 
                 if "[CANCEL:" in ai_response:
                     data = ai_response.split("[CANCEL:")[1].split("]")[0]
                     parts = [p.strip() for p in data.split(",")]
-
                     if len(parts) >= 2:
                         if cancel_booking(parts[0], parts[1]):
-                            st.error("removed" if lang == "English" else "تم الحذف")
+                            st.error("Booking removed.")
+                            st.rerun() # Refresh to update dashboard
                         else:
-                            st.warning("not found" if lang == "English" else "غير موجود")
+                            st.warning("Not found.")
 
                 if "[BOOKING:" in ai_response:
                     data = ai_response.split("[BOOKING:")[1].split("]")[0]
                     parts = [p.strip() for p in data.split(",")]
-
-                    if len(parts) >= 3:
-                        success, err = try_booking(parts[0], parts[1], parts[2])
-
+                    if len(parts) >= 4:
+                        name, d_id, slot, phone = parts[0], parts[1], parts[2], parts[3]
+                        success, err = try_booking(name, d_id, slot, phone)
                         if success:
-                            st.success("booking added" if lang == "English" else "تم الحجز")
+                            st.success("Booking confirmed in database!")
+                            notif_msg = f"Confirmed! {name}, your appointment with {DOCTOR_LIST[d_id]['en']} is on {slot}."
+                            show_whatsapp_button(phone, notif_msg)
                             st.balloons()
-                        else:
-                            st.warning(f"failed: {err}")
 
                 st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
-
             except Exception as err:
                 st.error(f"error: {err}")
 
 with admin_tab:
     st.subheader(text["dashboard"])
-
     conn = get_db_connection()
     data = pd.read_sql_query("SELECT * FROM appointments", conn)
     conn.close()
 
     if not data.empty:
-        st.metric("total bookings", len(data))
-
         for id, info in DOCTOR_LIST.items():
             df = data[data['doc_id'] == id]
             name = info["en"] if lang == "English" else info["ar"]
-
             with st.expander(f"{name} ({len(df)})"):
                 if not df.empty:
-                    st.table(df[['patient_name', 'slot']])
+                    st.table(df[['patient_name', 'slot', 'phone']])
 
         if st.button(text["clear"]):
             conn = get_db_connection()
@@ -213,6 +195,5 @@ with admin_tab:
             conn.commit()
             conn.close()
             st.rerun()
-
     else:
         st.info(text["empty"])
