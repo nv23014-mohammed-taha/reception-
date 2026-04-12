@@ -153,21 +153,33 @@ if "last_reminder_check" not in st.session_state:
 
 # ================= DOCTORS =================
 DOCTOR_LIST = {
-    "1": {"en": "Dr. Faisal Al-Mahmood (Cardiology)", "ar": "د. فيصل المحمود"},
-    "2": {"en": "Dr. Mariam Al-Sayed (Pediatrics)", "ar": "د. مريم السيد"},
-    "3": {"en": "Dr. Yousef Al-Haddad (Orthopedics)", "ar": "د. يوسف الحداد"},
-    "4": {"en": "Dr. Noura Al-Khalifa (Dermatology)", "ar": "د. نورة الخليفة"},
-    "5": {"en": "Dr. Khalid Al-Fares (Plastic Surgery)", "ar": "د. خالد الفارس"},
-    "6": {"en": "Dr. Sara Al-Ansari (OB-GYN)", "ar": "د. سارة الأنصاري"},
-    "7": {"en": "Dr. Jasim Al-Ghanem (Urology)", "ar": "د. جاسم الغانم"},
-    "8": {"en": "Dr. Layla Al-Mulla (Neurology)", "ar": "د. ليلى الملا"},
-    "9": {"en": "Dr. Hassan Ibrahim (Ophthalmology)", "ar": "د. حسن إبراهيم"},
-    "10": {"en": "Dr. Ahmed Al-Aali (General Medicine)", "ar": "د. أحمد العالي"}
+    "1": {"en": "Dr. Faisal Al-Mahmood (Cardiology)", "ar": "د. فيصل المحمود (القلب)"},
+    "2": {"en": "Dr. Mariam Al-Sayed (Pediatrics)", "ar": "د. مريم السيد (أطفال)"},
+    "3": {"en": "Dr. Yousef Al-Haddad (Orthopedics)", "ar": "د. يوسف الحداد (عظام)"},
+    "4": {"en": "Dr. Noura Al-Khalifa (Dermatology)", "ar": "د. نورة الخليفة (جلدية)"},
+    "5": {"en": "Dr. Khalid Al-Fares (Plastic Surgery)", "ar": "د. خالد الفارس (تجميل)"},
+    "6": {"en": "Dr. Sara Al-Ansari (OB-GYN)", "ar": "د. سارة الأنصاري (نساء وولادة)"},
+    "7": {"en": "Dr. Jasim Al-Ghanem (Urology)", "ar": "د. جاسم الغانم (مسالك)"},
+    "8": {"en": "Dr. Layla Al-Mulla (Neurology)", "ar": "د. ليلى الملا (أعصاب)"},
+    "9": {"en": "Dr. Hassan Ibrahim (Ophthalmology)", "ar": "د. حسن إبراهيم (عيون)"},
+    "10": {"en": "Dr. Ahmed Al-Aali (General Medicine)", "ar": "د. أحمد العالي (طب عام)"}
 }
 
-# ================= UI =================
-chat_tab, admin_tab = st.tabs(["chat", "dashboard"])
+# ================= SIDEBAR =================
+st.sidebar.title("Tools")
 
+if os.path.exists(DB_NAME):
+    with open(DB_NAME, "rb") as f:
+        st.sidebar.download_button(
+            label="Download DB",
+            data=f,
+            file_name="hospital_management.db"
+        )
+
+# ================= TABS =================
+chat_tab, admin_tab = st.tabs(["Chat", "Dashboard"])
+
+# ================= CHAT =================
 with chat_tab:
     st.title("Clinic Assistant")
 
@@ -186,8 +198,7 @@ with chat_tab:
 You are a clinic receptionist.
 
 Rules:
-- ALWAYS collect phone number before booking
-- NEVER book without phone
+- ALWAYS ask for phone number before booking
 
 Format:
 [BOOKING: Name, Phone, DocID, YYYY-MM-DD HH:MM]
@@ -235,14 +246,31 @@ Doctors: {DOCTOR_LIST}
 
             st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
 
+# ================= DASHBOARD =================
 with admin_tab:
-    st.subheader("Appointments")
+    st.subheader("Appointments Dashboard")
 
     conn = get_db_connection()
     df = pd.read_sql_query("SELECT * FROM appointments", conn)
     conn.close()
 
     if not df.empty:
-        st.dataframe(df)
+        st.metric("Total Bookings", len(df))
+
+        for id, info in DOCTOR_LIST.items():
+            doc_df = df[df["doc_id"] == id]
+            name = info["en"]
+
+            with st.expander(f"{name} ({len(doc_df)})"):
+                if not doc_df.empty:
+                    st.table(doc_df[["patient_name", "phone", "slot"]])
+
+        if st.button("Clear All"):
+            conn = get_db_connection()
+            conn.execute("DELETE FROM appointments")
+            conn.commit()
+            conn.close()
+            st.rerun()
+
     else:
         st.info("No bookings yet")
