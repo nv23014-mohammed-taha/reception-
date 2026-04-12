@@ -4,7 +4,7 @@ import sqlite3
 import pandas as pd
 from datetime import datetime
 import os
-import urllib.parse  # For encoding the WhatsApp message
+import urllib.parse # Used to format the WhatsApp message for the web link
 
 st.set_page_config(page_title="Clinic page", layout="wide")
 
@@ -22,31 +22,33 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
+    # Updated: Added a 'phone' column to store patient numbers
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS appointments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             patient_name TEXT,
             doc_id TEXT,
             slot TEXT,
-            phone TEXT,
+            phone TEXT, 
             UNIQUE(doc_id, slot)
         )
     ''')
     conn.commit()
     conn.close()
 
-# --- THE EASY WHATSAPP AUTOMATION ---
+# --- WHATSAPP AUTOMATION HELPER ---
 def show_whatsapp_button(phone, message):
+    """Creates a clickable WhatsApp button for the confirmation/reminder."""
     encoded_msg = urllib.parse.quote(message)
-    # Clean the phone number (remove spaces/plus signs for the URL)
+    # Clean the phone number (keep only digits)
     clean_phone = "".join(filter(str.isdigit, phone))
     url = f"https://wa.me/{clean_phone}?text={encoded_msg}"
     
     st.markdown(f"""
-        <div style="text-align: center; margin-top: 10px;">
+        <div style="text-align: center; margin: 10px 0;">
             <a href="{url}" target="_blank">
-                <button style="background-color: #25D366; color: white; border: none; padding: 12px 24px; border-radius: 8px; font-weight: bold; cursor: pointer; width: 100%;">
-                    📲 Send WhatsApp Confirmation
+                <button style="background-color: #25D366; color: white; border: none; padding: 12px 20px; border-radius: 8px; font-weight: bold; cursor: pointer; width: 100%;">
+                    📲 Send WhatsApp Confirmation/Reminder
                 </button>
             </a>
         </div>
@@ -61,6 +63,8 @@ def try_booking(name, doc, slot, phone):
                        (name, doc, slot, phone))
         conn.commit()
         return True, None
+    except sqlite3.IntegrityError:
+        return False, "Slot already taken"
     except Exception as e:
         return False, str(e)
     finally:
@@ -71,14 +75,11 @@ def cancel_booking(name, doc):
     cursor = conn.cursor()
     try:
         name = name.replace("Patient:", "").strip()
-        # Fixed: Use exact match or LIKE to clear the ghost data
-        cursor.execute("DELETE FROM appointments WHERE (patient_name LIKE ? OR patient_name = ?) AND doc_id=?",
-                       (f"%{name}%", name, doc))
-        rows = cursor.rowcount
+        cursor.execute("DELETE FROM appointments WHERE patient_name LIKE ? AND doc_id=?",
+                       (f"%{name}%", doc))
+        success = cursor.rowcount > 0
         conn.commit()
-        return rows > 0
-    except:
-        return False
+        return success
     finally:
         conn.close()
 
@@ -114,6 +115,7 @@ with chat_tab:
     conn = get_db_connection()
     booked_df = pd.read_sql_query("SELECT doc_id, slot FROM appointments", conn)
     conn.close()
+
     schedule = booked_df.to_string(index=False) if not booked_df.empty else "none"
 
     if "chat_history" not in st.session_state:
@@ -128,13 +130,14 @@ with chat_tab:
         with st.chat_message("user"):
             st.markdown(user_input)
 
+        # AI INSTRUCTION: Must ask for phone number now
         system_instruction = f"""
-        you are a clinic receptionist. Respond in {"Arabic" if lang == "العربية" else "English"}
-        today: {current_date} (Year 2026)
+        you are a clinic receptionist. respond in {"Arabic" if lang == "العربية" else "English"}.
+        today: {current_date} (Year 2026).
         doctors: {DOCTOR_LIST}
         busy slots: {schedule}
 
-        MANDATORY: 
+        RULES:
         1. If booking, you MUST ask for the patient's Name AND Phone number.
         2. use: [BOOKING: Name, DocID, YYYY-MM-DD HH:MM, Phone]
         3. use: [CANCEL: Name, DocID]
@@ -149,16 +152,18 @@ with chat_tab:
                 ai_response = response.choices[0].message.content
                 st.markdown(ai_response)
 
+                # Process Cancellation
                 if "[CANCEL:" in ai_response:
                     data = ai_response.split("[CANCEL:")[1].split("]")[0]
                     parts = [p.strip() for p in data.split(",")]
                     if len(parts) >= 2:
                         if cancel_booking(parts[0], parts[1]):
-                            st.error("Booking removed.")
-                            st.rerun() # Refresh to update dashboard
+                            st.error("Booking removed." if lang == "English" else "تم حذف الموعد")
+                            st.rerun() # Refresh to clear dashboard
                         else:
                             st.warning("Not found.")
 
+                # Process Booking
                 if "[BOOKING:" in ai_response:
                     data = ai_response.split("[BOOKING:")[1].split("]")[0]
                     parts = [p.strip() for p in data.split(",")]
@@ -166,14 +171,22 @@ with chat_tab:
                         name, d_id, slot, phone = parts[0], parts[1], parts[2], parts[3]
                         success, err = try_booking(name, d_id, slot, phone)
                         if success:
-                            st.success("Booking confirmed in database!")
-                            notif_msg = f"Confirmed! {name}, your appointment with {DOCTOR_LIST[d_id]['en']} is on {slot}."
-                            show_whatsapp_button(phone, notif_msg)
+                            st.success("Confirmed!" if lang == "English" else "تم الحجز")
+                            
+                            # CREATE WHATSAPP MESSAGE
+                            doc_name = DOCTOR_LIST[d_id]["en"] if lang == "English" else DOCTOR_LIST[d_id]["ar"]
+                            msg = f"Hello {name}! 🏥 Your appointment with {doc_name} is set for {slot}. See you soon!"
+                            if lang == "العربية":
+                                msg = f"مرحباً {name}! 🏥 موعدك مع {doc_name} في {slot}. نراك قريباً!"
+                            
+                            show_whatsapp_button(phone, msg)
                             st.balloons()
+                        else:
+                            st.warning(f"Failed: {err}")
 
                 st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
-            except Exception as err:
-                st.error(f"error: {err}")
+            except Exception as e:
+                st.error(f"Error: {e}")
 
 with admin_tab:
     st.subheader(text["dashboard"])
@@ -187,6 +200,7 @@ with admin_tab:
             name = info["en"] if lang == "English" else info["ar"]
             with st.expander(f"{name} ({len(df)})"):
                 if not df.empty:
+                    # Added phone column to dashboard table
                     st.table(df[['patient_name', 'slot', 'phone']])
 
         if st.button(text["clear"]):
