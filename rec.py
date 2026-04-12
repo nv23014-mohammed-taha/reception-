@@ -7,29 +7,26 @@ from datetime import datetime, timedelta
 import os
 import re
 
-# ================= APP SETUP =================
 st.set_page_config(page_title="Clinic System", layout="wide")
 
-lang = st.sidebar.selectbox("Language / اللغة", ["English", "العربية"])
+language = st.sidebar.selectbox("Language / اللغة", ["English", "العربية"])
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_NAME = os.path.join(BASE_DIR, 'hospital_management.db')
+DB_PATH = os.path.join(BASE_DIR, "hospital_management.db")
 
-# ================= AI (MISTRAL) =================
-mistral_client = None
-if "MISTRAL_API_KEY" in st.secrets:
-    mistral_client = Mistral(api_key=st.secrets["MISTRAL_API_KEY"])
+ai_client = Mistral(api_key=st.secrets["MISTRAL_API_KEY"]) if "MISTRAL_API_KEY" in st.secrets else None
 
-# ================= DATABASE =================
-def get_db_connection():
-    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    return conn
 
-def init_db():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
+def db_connection():
+    connection = sqlite3.connect(DB_PATH, check_same_thread=False)
+    connection.execute("PRAGMA journal_mode=WAL;")
+    return connection
+
+
+def setup_database():
+    connection = db_connection()
+    cursor = connection.cursor()
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS appointments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             patient_name TEXT,
@@ -38,14 +35,14 @@ def init_db():
             slot TEXT,
             UNIQUE(doc_id, slot)
         )
-    ''')
-    conn.commit()
-    conn.close()
+    """)
+    connection.commit()
+    connection.close()
 
-init_db()
 
-# ================= DOCTORS =================
-DOCTOR_LIST = {
+setup_database()
+
+DOCTORS = {
     "1": {"en": "Dr. Faisal Al-Mahmood (Cardiology)", "ar": "د. فيصل المحمود (القلب)"},
     "2": {"en": "Dr. Mariam Al-Sayed (Pediatrics)", "ar": "د. مريم السيد (أطفال)"},
     "3": {"en": "Dr. Yousef Al-Haddad (Orthopedics)", "ar": "د. يوسف الحداد (عظام)"},
@@ -58,151 +55,179 @@ DOCTOR_LIST = {
     "10": {"en": "Dr. Ahmed Al-Aali (General Medicine)", "ar": "د. أحمد العالي (طب عام)"}
 }
 
-# ================= TIME LOGIC =================
-def is_valid_future_time(slot):
+
+def valid_time(slot):
     try:
-        appointment_time = datetime.strptime(slot, "%Y-%m-%d %H:%M")
-        return appointment_time > datetime.now()
+        return datetime.strptime(slot, "%Y-%m-%d %H:%M") > datetime.now()
     except:
         return False
 
-def suggest_alternative_times(slot):
+
+def next_slots(slot):
     try:
         base = datetime.strptime(slot, "%Y-%m-%d %H:%M")
         return [(base + timedelta(minutes=30 * i)).strftime("%Y-%m-%d %H:%M") for i in range(1, 4)]
     except:
         return []
 
-# ================= BOOKING & CANCEL =================
-def try_booking(name, phone, doc, slot):
-    conn = get_db_connection()
-    cursor = conn.cursor()
+
+def book_appointment(name, phone, doc_id, slot):
+    conn = db_connection()
+    cur = conn.cursor()
     try:
         name = name.strip().lower()
-        cursor.execute("BEGIN IMMEDIATE")
-        
-        if not is_valid_future_time(slot):
+        cur.execute("BEGIN IMMEDIATE")
+
+        if not valid_time(slot):
             return False, "You cannot book past or current time slots."
 
-        cursor.execute("SELECT id FROM appointments WHERE doc_id=? AND slot=?", (doc, slot))
-        if cursor.fetchone():
-            return False, f"Slot taken. Try: {', '.join(suggest_alternative_times(slot))}"
+        cur.execute("SELECT 1 FROM appointments WHERE doc_id=? AND slot=?", (doc_id, slot))
+        if cur.fetchone():
+            return False, f"Slot taken. Try: {', '.join(next_slots(slot))}"
 
-        cursor.execute("INSERT INTO appointments (patient_name, phone, doc_id, slot) VALUES (?,?,?,?)", (name, phone, doc, slot))
+        cur.execute(
+            "INSERT INTO appointments (patient_name, phone, doc_id, slot) VALUES (?,?,?,?)",
+            (name, phone, doc_id, slot)
+        )
+
         conn.commit()
         return True, None
+
     except Exception as e:
         conn.rollback()
         return False, str(e)
+
     finally:
         conn.close()
 
-def cancel_booking(name, doc):
-    conn = get_db_connection()
-    cursor = conn.cursor()
+
+def cancel_appointment(name, doc_id):
+    conn = db_connection()
+    cur = conn.cursor()
     try:
         name = name.strip().lower()
-        cursor.execute("DELETE FROM appointments WHERE patient_name=? AND doc_id=?", (name, doc))
+        cur.execute("DELETE FROM appointments WHERE patient_name=? AND doc_id=?", (name, doc_id))
         conn.commit()
-        return cursor.rowcount > 0
-    except: return False
-    finally: conn.close()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
 
-# ================= WHATSAPP =================
-def send_whatsapp_confirmation(phone, name, doctor, slot):
+
+def send_whatsapp(phone, name, doctor, slot):
     try:
         client = Client(st.secrets["TWILIO_ACCOUNT_SID"], st.secrets["TWILIO_AUTH_TOKEN"])
-        msg = f"Appointment Confirmed ✅\n\nHello {name}\n👨‍⚕️ {doctor}\n📅 {slot}"
-        client.messages.create(body=msg, from_=st.secrets["TWILIO_WHATSAPP_NUMBER"], to=f"whatsapp:{phone}")
+        message = f"Appointment Confirmed ✅\n\nHello {name}\n👨‍⚕️ {doctor}\n📅 {slot}"
+        client.messages.create(
+            body=message,
+            from_=st.secrets["TWILIO_WHATSAPP_NUMBER"],
+            to=f"whatsapp:{phone}"
+        )
         return True
-    except: return False
+    except:
+        return False
 
-# ================= SIDEBAR TOOLS =================
+
 st.sidebar.title("Tools")
-if os.path.exists(DB_NAME):
-    with open(DB_NAME, "rb") as f:
-        st.sidebar.download_button(label="📥 Download Database", data=f, file_name="clinic_data.db")
 
-# ================= TABS =================
+if os.path.exists(DB_PATH):
+    with open(DB_PATH, "rb") as f:
+        st.sidebar.download_button("📥 Download Database", f, file_name="clinic_data.db")
+
+
 chat_tab, admin_tab = st.tabs(["Chat Assistant", "Admin Dashboard"])
 
-# ================= CHAT =================
+
 with chat_tab:
     st.title("Clinic Assistant")
-    
+
     now = datetime.now()
-    today_str = now.strftime("%A, %Y-%m-%d")
-    current_year = now.year
+    today = now.strftime("%A, %Y-%m-%d")
 
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
+    if "history" not in st.session_state:
+        st.session_state.history = []
 
-    for msg in st.session_state.chat_history:
-        with st.chat_message(msg["role"]): st.markdown(msg["content"])
+    for msg in st.session_state.history:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
-    if user_input := st.chat_input("How can I help you?"):
-        st.session_state.chat_history.append({"role": "user", "content": user_input})
-        with st.chat_message("user"): st.markdown(user_input)
+    user_msg = st.chat_input("How can I help you?")
 
-        system_instruction = f"""
-        You are a clinic receptionist. Today is {today_str}.
-        RULES:
-        - All bookings MUST be in the year {current_year} (unless specified).
-        - Format: [BOOKING: Name, Phone, DocID, YYYY-MM-DD HH:MM]
-        - Doctors: {DOCTOR_LIST}
-        """
+    if user_msg:
+        st.session_state.history.append({"role": "user", "content": user_msg})
+        with st.chat_message("user"):
+            st.markdown(user_msg)
 
-        response = mistral_client.chat.complete(
+        system_prompt = f"""
+You are a clinic receptionist. Today is {today}.
+All bookings must be for {now.year}.
+Format: [BOOKING: Name, Phone, DocID, YYYY-MM-DD HH:MM]
+Doctors: {DOCTORS}
+"""
+
+        response = ai_client.chat.complete(
             model="mistral-large-latest",
-            messages=[{"role": "system", "content": system_instruction}] + st.session_state.chat_history
+            messages=[{"role": "system", "content": system_prompt}] + st.session_state.history
         )
 
-        ai_reply = response.choices[0].message.content
-        with st.chat_message("assistant"): st.markdown(ai_reply)
+        reply = response.choices[0].message.content
 
-        # Parsing Booking
-        if b_match := re.search(r"\[BOOKING:(.*?)\]", ai_reply):
-            parts = [p.strip() for p in b_match.group(1).split(",")]
-            if len(parts) == 4:
-                name, phone, doc, slot = parts
-                if "2023" in slot: slot = slot.replace("2023", str(current_year))
-                
-                ok, err = try_booking(name, phone, doc, slot)
+        with st.chat_message("assistant"):
+            st.markdown(reply)
+
+        booking = re.search(r"\[BOOKING:(.*?)\]", reply)
+        if booking:
+            data = [x.strip() for x in booking.group(1).split(",")]
+            if len(data) == 4:
+                name, phone, doc, slot = data
+
+                if "2023" in slot:
+                    slot = slot.replace("2023", str(now.year))
+
+                ok, err = book_appointment(name, phone, doc, slot)
+
                 if ok:
-                    st.success(f"Confirmed for {slot}!")
-                    send_whatsapp_confirmation(phone, name, DOCTOR_LIST[doc]["en"], slot)
+                    st.success(f"Booked for {slot}")
+                    send_whatsapp(phone, name, DOCTORS[doc]["en"], slot)
                     st.balloons()
-                else: st.warning(err)
+                else:
+                    st.warning(err)
 
-        # Parsing Cancel
-        if c_match := re.search(r"\[CANCEL:(.*?)\]", ai_reply):
-            parts = [p.strip() for p in c_match.group(1).split(",")]
-            if len(parts) == 2:
-                if cancel_booking(parts[0], parts[1]): st.success("Cancelled successfully.")
-                else: st.warning("Appointment not found.")
+        cancel = re.search(r"\[CANCEL:(.*?)\]", reply)
+        if cancel:
+            name, doc = [x.strip() for x in cancel.group(1).split(",")]
+            if cancel_appointment(name, doc):
+                st.success("Cancelled successfully")
+            else:
+                st.warning("Not found")
 
-        st.session_state.chat_history.append({"role": "assistant", "content": ai_reply})
+        st.session_state.history.append({"role": "assistant", "content": reply})
 
-# ================= DASHBOARD =================
+
 with admin_tab:
     st.subheader("Current Appointments")
-    conn = get_db_connection()
+
+    conn = db_connection()
     df = pd.read_sql_query("SELECT * FROM appointments", conn)
     conn.close()
 
     if not df.empty:
         st.metric("Total Bookings", len(df))
-        for id, info in DOCTOR_LIST.items():
-            doc_df = df[df["doc_id"] == id]
-            with st.expander(f"{info['en']} ({len(doc_df)})"):
-                if not doc_df.empty: st.table(doc_df[["patient_name", "phone", "slot"]])
-                else: st.write("No appointments.")
-        
-        if st.button("🗑️ Clear All Data"):
-            conn = get_db_connection()
+
+        for doc_id, doc in DOCTORS.items():
+            subset = df[df["doc_id"] == doc_id]
+
+            with st.expander(f"{doc['en']} ({len(subset)})"):
+                if not subset.empty:
+                    st.table(subset[["patient_name", "phone", "slot"]])
+                else:
+                    st.write("No appointments")
+
+        if st.button("Clear All Data"):
+            conn = db_connection()
             conn.execute("DELETE FROM appointments")
             conn.commit()
             conn.close()
             st.rerun()
+
     else:
-        st.info("No bookings found in the database.")
+        st.info("No bookings found")
