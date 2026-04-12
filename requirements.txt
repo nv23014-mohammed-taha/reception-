@@ -3,3 +3,4 @@ mistralai
 st-supabase-connection
 supabase
 pandas
+twilio
