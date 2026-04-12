@@ -116,7 +116,7 @@ def cancel_appointment(name, doc_id):
 def send_whatsapp(phone, name, doctor, slot):
     try:
         client = Client(st.secrets["TWILIO_ACCOUNT_SID"], st.secrets["TWILIO_AUTH_TOKEN"])
-        message = f"Appointment Confirmed ✅\n\nHello {name}\n👨‍⚕️ {doctor}\n📅 {slot}"
+        message = f"Appointment Confirmed \n\nHello {name}\n {doctor}\n {slot}"
         client.messages.create(
             body=message,
             from_=st.secrets["TWILIO_WHATSAPP_NUMBER"],
