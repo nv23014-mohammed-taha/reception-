@@ -4,3 +4,6 @@ st-supabase-connection
 supabase
 pandas
 twilio
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
