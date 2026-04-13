@@ -231,3 +231,123 @@ with admin_tab:
 
     else:
         st.info("No bookings found")
+
+DOCTOR_SCHEDULE = {
+    "1": {"start": 9, "end": 17, "days": [0,1,2,3,4]},
+    "2": {"start": 10, "end": 16, "days": [0,1,2,3,4]},
+    "3": {"start": 9, "end": 15, "days": [0,1,2,3,4]},
+    "4": {"start": 11, "end": 18, "days": [0,1,2,3,4]},
+    "5": {"start": 12, "end": 20, "days": [0,1,2,3,4]},
+    "6": {"start": 9, "end": 14, "days": [0,1,2,3,4]},
+    "7": {"start": 10, "end": 17, "days": [0,1,2,3,4]},
+    "8": {"start": 9, "end": 16, "days": [0,1,2,3,4]},
+    "9": {"start": 9, "end": 17, "days": [0,1,2,3,4]},
+    "10": {"start": 8, "end": 14, "days": [0,1,2,3,4]}
+}
+
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+tz = ZoneInfo("Asia/Bahrain")
+
+
+def is_doctor_available(doc_id, slot):
+    try:
+        dt = datetime.strptime(slot, "%Y-%m-%d %H:%M")
+        dt = dt.replace(tzinfo=tz)
+
+        s = DOCTOR_SCHEDULE.get(doc_id)
+        if not s:
+            return True
+
+        if dt.weekday() not in s["days"]:
+            return False
+
+        if dt.hour < s["start"] or dt.hour >= s["end"]:
+            return False
+
+        if "break" in s:
+            b1, b2 = s["break"]
+            if b1 <= dt.hour < b2:
+                return False
+
+        return True
+
+    except:
+        return False
+
+
+def next_valid_slots(doc_id, slot):
+    try:
+        base = datetime.strptime(slot, "%Y-%m-%d %H:%M")
+        base = base.replace(tzinfo=tz)
+
+        out = []
+        step = 30
+
+        for i in range(1, 7):
+            t = base + timedelta(minutes=step * i)
+            t_str = t.strftime("%Y-%m-%d %H:%M")
+
+            if is_doctor_available(doc_id, t_str):
+                out.append(t_str)
+
+            if len(out) == 3:
+                break
+
+        return out
+
+    except:
+        return []
+
+
+def is_valid_future_time(slot):
+    try:
+        now = datetime.now(tz)
+        t = datetime.strptime(slot, "%Y-%m-%d %H:%M")
+        t = t.replace(tzinfo=tz)
+
+        return t > now
+
+    except:
+        return False
+
+
+def book_appointment(name, phone, doc_id, slot):
+    conn = db_connection()
+    cur = conn.cursor()
+
+    try:
+        name = name.strip().lower()
+        cur.execute("BEGIN IMMEDIATE")
+
+        if not is_valid_future_time(slot):
+            return False, "Pick a future time."
+
+        if not is_doctor_available(doc_id, slot):
+            alt = next_valid_slots(doc_id, slot)
+            return False, f"Doctor not available. Try {', '.join(alt) if alt else 'something else'}"
+
+        cur.execute(
+            "SELECT 1 FROM appointments WHERE doc_id=? AND slot=?",
+            (doc_id, slot)
+        )
+
+        if cur.fetchone():
+            alt = next_valid_slots(doc_id, slot)
+            return False, f"Already booked. Try {', '.join(alt)}"
+
+        cur.execute(
+            "INSERT INTO appointments (patient_name, phone, doc_id, slot) VALUES (?,?,?,?)",
+            (name, phone, doc_id, slot)
+        )
+
+        conn.commit()
+        return True, None
+
+    except Exception as e:
+        conn.rollback()
+        return False, str(e)
+
+    finally:
+        conn.close()
