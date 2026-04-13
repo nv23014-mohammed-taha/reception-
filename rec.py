@@ -7,7 +7,97 @@ from datetime import datetime, timedelta
 import os
 import re
 import base64
+# ================= PATCH: FIX TIME + RULES =================
 
+CURRENT_YEAR = 2026
+
+
+def normalize_slot(slot):
+    try:
+        dt = datetime.strptime(slot, "%Y-%m-%d %H:%M")
+        if dt.year != CURRENT_YEAR:
+            dt = dt.replace(year=CURRENT_YEAR)
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except:
+        return slot
+
+
+# ================= PATCH: DOCTOR SCHEDULE =================
+# Add AFTER your DOCTORS dictionary (replace old schedule)
+
+DOCTOR_SCHEDULE = {
+    str(i): {
+        "start": 8,
+        "end": 21,
+        "days": [6, 0, 1, 2, 3]  # Sunday–Thursday
+    }
+    for i in range(1, 11)
+}
+
+
+# ================= PATCH: STRICT BOOKING RULE =================
+# INSIDE book_appointment() REPLACE validation part with this:
+
+def booking_validation_patch(cur, doc_id, slot):
+
+    # normalize slot year fix
+    slot = normalize_slot(slot)
+
+    # future check
+    if not is_future(slot):
+        return False, "Pick a future time"
+
+    # doctor schedule check
+    if not doctor_available(doc_id, slot):
+        return False, "Doctor not available at this time"
+
+    # STRONG OVERLAP PROTECTION
+    cur.execute(
+        "SELECT 1 FROM appointments WHERE doc_id=? AND slot=?",
+        (doc_id, slot)
+    )
+
+    if cur.fetchone():
+        return False, "This doctor is already booked at this time"
+
+    return True, slot
+
+
+# ================= PATCH: SAFE SLOT FIX =================
+def safe_next_slots(slot):
+    try:
+        slot = normalize_slot(slot)
+        base = datetime.strptime(slot, "%Y-%m-%d %H:%M")
+        return [
+            (base + timedelta(minutes=30 * i)).strftime("%Y-%m-%d %H:%M")
+            for i in range(1, 4)
+        ]
+    except:
+        return []
+
+
+# ================= PATCH: UI AESTHETIC (OPTIONAL) =================
+st.markdown("""
+<style>
+.main {
+    background-color: #0f1115;
+}
+h1 {
+    text-align: center;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+.stTabs [data-baseweb="tab"] {
+    font-size: 15px;
+}
+div[data-testid="stExpander"] {
+    border-radius: 14px;
+    border: 1px solid #2a2a2a;
+    background: #161a22;
+    padding: 5px;
+}
+</style>
+""", unsafe_allow_html=True)
 st.set_page_config(page_title="Clinic System", layout="wide")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
