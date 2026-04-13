@@ -10,3 +10,4 @@ google-auth-oauthlib
 openai-whisper
 torch
 ffmpeg-python
+openai
