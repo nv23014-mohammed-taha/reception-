@@ -1,12 +1,12 @@
 import streamlit as st
 from mistralai.client import Mistral
 from twilio.rest import Client
-from openai import OpenAI
 import sqlite3
 import pandas as pd
 from datetime import datetime, timedelta
 import os
 import re
+import base64
 
 st.set_page_config(page_title="Clinic System", layout="wide")
 
@@ -15,8 +15,8 @@ DB_PATH = os.path.join(BASE_DIR, "hospital_management.db")
 
 language = st.sidebar.selectbox("Language / اللغة", ["English", "Arabic"])
 
+
 ai_client = Mistral(api_key=st.secrets["MISTRAL_API_KEY"]) if "MISTRAL_API_KEY" in st.secrets else None
-voice_client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"]) if "OPENAI_API_KEY" in st.secrets else None
 
 
 def db_connection():
@@ -59,46 +59,17 @@ DOCTORS = {
 }
 
 
-DOCTOR_SCHEDULE = {
-    "1": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "2": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "3": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "4": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "5": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "6": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "7": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "8": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "9": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "10": {"start": 9, "end": 18, "days": [0,1,2,3,4]}
-}
+def t(text_en, text_ar):
+    return text_ar if language == "Arabic" else text_en
 
 
-def valid_phone(phone):
-    return phone.startswith("+") and len(phone) >= 8
+def db():
+    return db_connection()
 
 
 def is_future(slot):
     try:
         return datetime.strptime(slot, "%Y-%m-%d %H:%M") > datetime.now()
-    except:
-        return False
-
-
-def doctor_available(doc_id, slot):
-    try:
-        dt = datetime.strptime(slot, "%Y-%m-%d %H:%M")
-        s = DOCTOR_SCHEDULE.get(doc_id)
-
-        if not s:
-            return True
-
-        if dt.weekday() not in s["days"]:
-            return False
-
-        if dt.hour < s["start"] or dt.hour >= s["end"]:
-            return False
-
-        return True
     except:
         return False
 
@@ -112,29 +83,21 @@ def next_slots(slot):
 
 
 def book_appointment(name, phone, doc_id, slot):
-    conn = db_connection()
+    conn = db()
     cur = conn.cursor()
-
     try:
-        name = name.strip().lower()
         cur.execute("BEGIN IMMEDIATE")
 
-        if not valid_phone(phone):
-            return False, "Invalid phone number"
-
         if not is_future(slot):
-            return False, "Pick a future time"
-
-        if not doctor_available(doc_id, slot):
-            return False, f"Doctor not available. Try: {', '.join(next_slots(slot))}"
+            return False, "Invalid time"
 
         cur.execute("SELECT 1 FROM appointments WHERE doc_id=? AND slot=?", (doc_id, slot))
         if cur.fetchone():
-            return False, f"Slot taken. Try: {', '.join(next_slots(slot))}"
+            return False, f"Slot taken. Try {', '.join(next_slots(slot))}"
 
         cur.execute(
             "INSERT INTO appointments (patient_name, phone, doc_id, slot) VALUES (?,?,?,?)",
-            (name, phone, doc_id, slot)
+            (name.strip().lower(), phone, doc_id, slot)
         )
 
         conn.commit()
@@ -149,99 +112,101 @@ def book_appointment(name, phone, doc_id, slot):
 
 
 def cancel_appointment(name, doc_id):
-    conn = db_connection()
+    conn = db()
     cur = conn.cursor()
-    try:
-        cur.execute("DELETE FROM appointments WHERE patient_name=? AND doc_id=?", (name.strip().lower(), doc_id))
-        conn.commit()
-        return cur.rowcount > 0
-    finally:
-        conn.close()
+    cur.execute("DELETE FROM appointments WHERE patient_name=? AND doc_id=?", (name.strip().lower(), doc_id))
+    conn.commit()
+    conn.close()
+    return True
 
 
 def send_whatsapp(phone, name, doctor, slot):
     try:
-        client = Client(
-            st.secrets["TWILIO_ACCOUNT_SID"],
-            st.secrets["TWILIO_AUTH_TOKEN"]
-        )
-
-        msg = f"Appointment Confirmed\n{name}\n{doctor}\n{slot}"
-
-        res = client.messages.create(
-            body=msg,
+        client = Client(st.secrets["TWILIO_ACCOUNT_SID"], st.secrets["TWILIO_AUTH_TOKEN"])
+        client.messages.create(
+            body=f"Appointment Confirmed\n{name}\n{doctor}\n{slot}",
             from_=st.secrets["TWILIO_WHATSAPP_NUMBER"],
             to=f"whatsapp:{phone}"
         )
-
-        st.write("WhatsApp SID:", res.sid)
         return True
-
     except Exception as e:
-        st.error(f"WhatsApp Error: {e}")
+        st.error(str(e))
         return False
 
 
-def transcribe_audio(audio_file):
-    try:
-        result = voice_client.audio.transcriptions.create(
-            model="whisper-1",
-            file=audio_file
-        )
-        return result.text
-    except Exception as e:
-        st.error(f"Voice Error: {e}")
-        return None
+# ---------------- VOICE (CLICK TO RECORD) ----------------
+def audio_recorder():
+    st.markdown("### Voice Input")
+
+    audio_html = """
+    <button onclick="startRecording()">Start Recording</button>
+    <button onclick="stopRecording()">Stop</button>
+
+    <script>
+    let recorder;
+    let chunks = [];
+
+    async function startRecording() {
+        let stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        recorder = new MediaRecorder(stream);
+
+        recorder.ondataavailable = e => chunks.push(e.data);
+
+        recorder.onstop = async () => {
+            let blob = new Blob(chunks, { type: 'audio/wav' });
+            let reader = new FileReader();
+            reader.readAsDataURL(blob);
+            reader.onloadend = () => {
+                window.parent.postMessage(reader.result, "*");
+            };
+        };
+
+        recorder.start();
+    }
+
+    function stopRecording() {
+        recorder.stop();
+    }
+    </script>
+    """
+
+    st.components.v1.html(audio_html, height=120)
 
 
-st.sidebar.title("Clinic Tools")
+# ---------------- UI ----------------
 
-
-chat_tab, admin_tab = st.tabs(["Chat Assistant", "Admin Dashboard"])
+chat_tab, admin_tab = st.tabs(
+    [t("Chat Assistant", "مساعد العيادة"), t("Admin Dashboard", "لوحة التحكم")]
+)
 
 
 with chat_tab:
-    st.markdown("<h1 style='text-align:center;'>Clinic Assistant System</h1>", unsafe_allow_html=True)
-    st.markdown("---")
+    st.title(t("Clinic Assistant", "مساعد العيادة"))
 
     if "history" not in st.session_state:
         st.session_state.history = []
 
-    st.subheader("Voice Input")
+    audio_recorder()
 
-    audio = st.file_uploader("Upload voice (mp3/wav/m4a)", type=["mp3", "wav", "m4a"])
-
-    voice_text = None
-
-    if audio and voice_client:
-        st.audio(audio)
-        voice_text = transcribe_audio(audio)
-        if voice_text:
-            st.info(voice_text)
-
-    text_input = st.chat_input("Type or use voice...")
-
-    user_msg = voice_text if voice_text else text_input
+    user_msg = st.chat_input(t("Type here...", "اكتب هنا..."))
 
     if user_msg:
         st.session_state.history.append({"role": "user", "content": user_msg})
-        st.chat_message("user").markdown(user_msg)
-
-        now = datetime.now()
 
         system_prompt = f"""
-You are a strict clinic receptionist AI.
-Return ONLY:
+You are a clinic receptionist.
+Reply ONLY in this format if booking:
 [BOOKING: Name, Phone, DocID, YYYY-MM-DD HH:MM]
 
-If unclear, ask questions.
-Doctors: {DOCTORS}
+Doctors:
+{DOCTORS}
 """
 
         if ai_client:
             response = ai_client.chat.complete(
                 model="mistral-large-latest",
-                messages=[{"role": "system", "content": system_prompt}] + st.session_state.history
+                messages=[{"role": "system", "content": system_prompt}]
+                + st.session_state.history
             )
             reply = response.choices[0].message.content
         else:
@@ -256,37 +221,35 @@ Doctors: {DOCTORS}
 
             if len(parts) == 4:
                 name, phone, doc, slot = parts
-
                 ok, err = book_appointment(name, phone, doc, slot)
 
                 if ok:
-                    st.success("Appointment booked successfully")
                     send_whatsapp(phone, name, DOCTORS[doc]["en"], slot)
+                    st.success("Booked")
                 else:
                     st.warning(err)
-
-        cancel = re.search(r"\[CANCEL:(.*?)\]", reply)
-
-        if cancel:
-            name, doc = [x.strip() for x in cancel.group(1).split(",")]
-
-            if cancel_appointment(name, doc):
-                st.success("Appointment cancelled")
-            else:
-                st.warning("Not found")
 
         st.session_state.history.append({"role": "assistant", "content": reply})
 
 
+# ---------------- ADMIN (RESTORED ORIGINAL STYLE) ----------------
 with admin_tab:
-    st.subheader("Appointments Dashboard")
+    st.subheader(t("Current Appointments", "المواعيد الحالية"))
 
-    conn = db_connection()
+    conn = db()
     df = pd.read_sql_query("SELECT * FROM appointments", conn)
     conn.close()
 
-    if len(df):
-        st.metric("Total Appointments", len(df))
-        st.dataframe(df, use_container_width=True)
+    if not df.empty:
+        st.metric(t("Total Bookings", "إجمالي الحجوزات"), len(df))
+
+        for doc_id, doc in DOCTORS.items():
+            sub = df[df["doc_id"] == doc_id]
+
+            with st.expander(doc["en"] if language == "English" else doc["ar"]):
+                if not sub.empty:
+                    st.table(sub[["patient_name", "phone", "slot"]])
+                else:
+                    st.write(t("No appointments", "لا توجد مواعيد"))
     else:
-        st.info("No appointments found")
+        st.info(t("No bookings found", "لا توجد حجوزات"))
