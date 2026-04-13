@@ -351,3 +351,11 @@ def book_appointment(name, phone, doc_id, slot):
 
     finally:
         conn.close()
+
+def send_reminder(phone, name, doctor, slot):
+    msg = f"Reminder ⏰\nHi {name}, your appointment with {doctor} is at {slot}"
+    client.messages.create(
+        body=msg,
+        from_=st.secrets["TWILIO_WHATSAPP_NUMBER"],
+        to=f"whatsapp:{phone}"
+    )
