@@ -8,7 +8,7 @@ import os
 import re
 import tempfile
 from openai import OpenAI
-from audiorecorder import audiorecorder
+from streamlit_audiorecorder import audiorecorder
 
 st.set_page_config(page_title="Clinic System", layout="wide")
 
