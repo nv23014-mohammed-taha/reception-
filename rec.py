@@ -23,6 +23,7 @@ if "MISTRAL_API_KEY" in st.secrets:
 voice_client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 
+# ================= DB =================
 def db_connection():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
@@ -49,6 +50,7 @@ def setup_database():
 setup_database()
 
 
+# ================= DATA =================
 DOCTORS = {
     "1": {"en": "Dr. Faisal Al-Mahmood (Cardiology)", "ar": "د. فيصل المحمود (القلب)"},
     "2": {"en": "Dr. Mariam Al-Sayed (Pediatrics)", "ar": "د. مريم السيد (أطفال)"},
@@ -64,19 +66,11 @@ DOCTORS = {
 
 
 DOCTOR_SCHEDULE = {
-    "1": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "2": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "3": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "4": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "5": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "6": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "7": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "8": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "9": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "10": {"start": 9, "end": 18, "days": [0,1,2,3,4]}
+    k: {"start": 9, "end": 18, "days": [0, 1, 2, 3, 4]} for k in DOCTORS
 }
 
 
+# ================= HELPERS =================
 def is_future(slot):
     try:
         return datetime.strptime(slot, "%Y-%m-%d %H:%M") > datetime.now()
@@ -88,9 +82,6 @@ def doctor_available(doc_id, slot):
     try:
         dt = datetime.strptime(slot, "%Y-%m-%d %H:%M")
         s = DOCTOR_SCHEDULE.get(doc_id)
-
-        if not s:
-            return True
 
         if dt.weekday() not in s["days"]:
             return False
@@ -111,12 +102,12 @@ def next_slots(slot):
         return []
 
 
+# ================= BOOKING =================
 def book_appointment(name, phone, doc_id, slot):
     conn = db_connection()
     cur = conn.cursor()
 
     try:
-        name = name.strip().lower()
         cur.execute("BEGIN IMMEDIATE")
 
         if not is_future(slot):
@@ -125,17 +116,13 @@ def book_appointment(name, phone, doc_id, slot):
         if not doctor_available(doc_id, slot):
             return False, f"Doctor not available. Try: {', '.join(next_slots(slot))}"
 
-        cur.execute(
-            "SELECT 1 FROM appointments WHERE doc_id=? AND slot=?",
-            (doc_id, slot)
-        )
-
+        cur.execute("SELECT 1 FROM appointments WHERE doc_id=? AND slot=?", (doc_id, slot))
         if cur.fetchone():
             return False, f"Slot taken. Try: {', '.join(next_slots(slot))}"
 
         cur.execute(
             "INSERT INTO appointments (patient_name, phone, doc_id, slot) VALUES (?,?,?,?)",
-            (name, phone, doc_id, slot)
+            (name.lower().strip(), phone, doc_id, slot)
         )
 
         conn.commit()
@@ -152,7 +139,8 @@ def book_appointment(name, phone, doc_id, slot):
 def cancel_appointment(name, doc_id):
     conn = db_connection()
     cur = conn.cursor()
-    cur.execute("DELETE FROM appointments WHERE patient_name=? AND doc_id=?", (name.strip().lower(), doc_id))
+    cur.execute("DELETE FROM appointments WHERE patient_name=? AND doc_id=?",
+                (name.lower().strip(), doc_id))
     conn.commit()
     conn.close()
     return True
@@ -175,7 +163,7 @@ def send_whatsapp(phone, name, doctor, slot):
         return False
 
 
-# ================= VOICE FEATURE (FIXED - NO EXTRA LIBRARIES) =================
+# ================= VOICE (FIXED + SAFE) =================
 def transcribe_audio(audio_bytes):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
         tmp.write(audio_bytes)
@@ -189,14 +177,13 @@ def transcribe_audio(audio_bytes):
     return result.text
 
 
+# prevent duplicate voice spam
+if "last_audio" not in st.session_state:
+    st.session_state.last_audio = None
+
+
 # ================= UI =================
-
 st.sidebar.title("Tools")
-
-if os.path.exists(DB_PATH):
-    with open(DB_PATH, "rb") as f:
-        st.sidebar.download_button("Download Database", f, file_name="clinic_data.db")
-
 
 chat_tab, admin_tab = st.tabs(["Chat Assistant", "Admin Dashboard"])
 
@@ -207,15 +194,25 @@ with chat_tab:
     if "history" not in st.session_state:
         st.session_state.history = []
 
-    # AUDIO INPUT BUTTON (NO ERRORS, BUILT-IN STREAMLIT)
+    # ---------- VOICE ----------
     audio = st.audio_input("Record Voice Message")
     voice_text = None
 
     if audio is not None:
-        voice_text = transcribe_audio(audio.getvalue())
-        st.success("Voice converted to text")
-        st.write(voice_text)
+        audio_bytes = audio.getvalue()
 
+        if st.session_state.last_audio != audio_bytes:
+            st.session_state.last_audio = audio_bytes
+
+            try:
+                voice_text = transcribe_audio(audio_bytes)
+                st.success("Transcribed")
+                st.write(voice_text)
+
+            except Exception:
+                st.error("Voice failed (try again in a moment)")
+
+    # ---------- CHAT ----------
     for msg in st.session_state.history:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
@@ -233,6 +230,7 @@ with chat_tab:
 
         system_prompt = f"""
 You are a clinic receptionist.
+You MUST respond in the SAME language as the user (English or Arabic).
 Today is {now.strftime("%A %Y-%m-%d")}.
 Return booking in format:
 [BOOKING: Name, Phone, DocID, YYYY-MM-DD HH:MM]
@@ -259,9 +257,6 @@ Doctors: {DOCTORS}
             if len(parts) == 4:
                 name, phone, doc, slot = parts
 
-                if "2023" in slot:
-                    slot = slot.replace("2023", str(now.year))
-
                 ok, err = book_appointment(name, phone, doc, slot)
 
                 if ok:
@@ -274,15 +269,12 @@ Doctors: {DOCTORS}
 
         if cancel:
             name, doc = [x.strip() for x in cancel.group(1).split(",")]
-
-            if cancel_appointment(name, doc):
-                st.success("Cancelled successfully")
-            else:
-                st.warning("Not found")
+            cancel_appointment(name, doc)
 
         st.session_state.history.append({"role": "assistant", "content": reply})
 
 
+# ================= ADMIN =================
 with admin_tab:
     st.subheader("Appointments")
 
