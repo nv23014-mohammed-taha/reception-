@@ -6,6 +6,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 import os
 import re
+import whisper
 
 st.set_page_config(page_title="Clinic System", layout="wide")
 
@@ -14,19 +15,21 @@ language = st.sidebar.selectbox("Language / اللغة", ["English", "العرب
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "hospital_management.db")
 
-ai_client = Mistral(api_key=st.secrets["MISTRAL_API_KEY"]) if "MISTRAL_API_KEY" in st.secrets else None
+ai_client = None
+if "MISTRAL_API_KEY" in st.secrets:
+    ai_client = Mistral(api_key=st.secrets["MISTRAL_API_KEY"])
 
 
 def db_connection():
-    connection = sqlite3.connect(DB_PATH, check_same_thread=False)
-    connection.execute("PRAGMA journal_mode=WAL;")
-    return connection
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    return conn
 
 
 def setup_database():
-    connection = db_connection()
-    cursor = connection.cursor()
-    cursor.execute("""
+    conn = db_connection()
+    cur = conn.cursor()
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS appointments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             patient_name TEXT,
@@ -36,8 +39,8 @@ def setup_database():
             UNIQUE(doc_id, slot)
         )
     """)
-    connection.commit()
-    connection.close()
+    conn.commit()
+    conn.close()
 
 
 setup_database()
@@ -55,10 +58,45 @@ DOCTORS = {
     "10": {"en": "Dr. Ahmed Al-Aali (General Medicine)", "ar": "د. أحمد العالي (طب عام)"}
 }
 
+DOCTOR_SCHEDULE = {
+    "1": {"start": 9, "end": 17, "days": [0,1,2,3,4]},
+    "2": {"start": 10, "end": 16, "days": [0,1,2,3,4]},
+    "3": {"start": 9, "end": 15, "days": [0,1,2,3,4]},
+    "4": {"start": 11, "end": 18, "days": [0,1,2,3,4]},
+    "5": {"start": 12, "end": 20, "days": [0,1,2,3,4]},
+    "6": {"start": 9, "end": 14, "days": [0,1,2,3,4]},
+    "7": {"start": 10, "end": 17, "days": [0,1,2,3,4]},
+    "8": {"start": 9, "end": 16, "days": [0,1,2,3,4]},
+    "9": {"start": 9, "end": 17, "days": [0,1,2,3,4]},
+    "10": {"start": 8, "end": 14, "days": [0,1,2,3,4]}
+}
 
-def valid_time(slot):
+
+tz = datetime.now().astimezone().tzinfo
+
+
+def is_future(slot):
     try:
         return datetime.strptime(slot, "%Y-%m-%d %H:%M") > datetime.now()
+    except:
+        return False
+
+
+def doctor_available(doc_id, slot):
+    try:
+        dt = datetime.strptime(slot, "%Y-%m-%d %H:%M")
+        s = DOCTOR_SCHEDULE.get(doc_id)
+
+        if not s:
+            return True
+
+        if dt.weekday() not in s["days"]:
+            return False
+
+        if dt.hour < s["start"] or dt.hour >= s["end"]:
+            return False
+
+        return True
     except:
         return False
 
@@ -66,7 +104,7 @@ def valid_time(slot):
 def next_slots(slot):
     try:
         base = datetime.strptime(slot, "%Y-%m-%d %H:%M")
-        return [(base + timedelta(minutes=30 * i)).strftime("%Y-%m-%d %H:%M") for i in range(1, 4)]
+        return [(base + timedelta(minutes=30*i)).strftime("%Y-%m-%d %H:%M") for i in range(1,4)]
     except:
         return []
 
@@ -74,14 +112,22 @@ def next_slots(slot):
 def book_appointment(name, phone, doc_id, slot):
     conn = db_connection()
     cur = conn.cursor()
+
     try:
         name = name.strip().lower()
         cur.execute("BEGIN IMMEDIATE")
 
-        if not valid_time(slot):
-            return False, "You cannot book past or current time slots."
+        if not is_future(slot):
+            return False, "Pick a future time."
 
-        cur.execute("SELECT 1 FROM appointments WHERE doc_id=? AND slot=?", (doc_id, slot))
+        if not doctor_available(doc_id, slot):
+            return False, f"Doctor not available. Try: {', '.join(next_slots(slot))}"
+
+        cur.execute(
+            "SELECT 1 FROM appointments WHERE doc_id=? AND slot=?",
+            (doc_id, slot)
+        )
+
         if cur.fetchone():
             return False, f"Slot taken. Try: {', '.join(next_slots(slot))}"
 
@@ -106,7 +152,10 @@ def cancel_appointment(name, doc_id):
     cur = conn.cursor()
     try:
         name = name.strip().lower()
-        cur.execute("DELETE FROM appointments WHERE patient_name=? AND doc_id=?", (name, doc_id))
+        cur.execute(
+            "DELETE FROM appointments WHERE patient_name=? AND doc_id=?",
+            (name, doc_id)
+        )
         conn.commit()
         return cur.rowcount > 0
     finally:
@@ -115,16 +164,30 @@ def cancel_appointment(name, doc_id):
 
 def send_whatsapp(phone, name, doctor, slot):
     try:
-        client = Client(st.secrets["TWILIO_ACCOUNT_SID"], st.secrets["TWILIO_AUTH_TOKEN"])
-        message = f"Appointment Confirmed \n\nHello {name}\n {doctor}\n {slot}"
+        client = Client(
+            st.secrets["TWILIO_ACCOUNT_SID"],
+            st.secrets["TWILIO_AUTH_TOKEN"]
+        )
+
+        msg = f"Appointment Confirmed\n\n{name}\n{doctor}\n{slot}"
+
         client.messages.create(
-            body=message,
+            body=msg,
             from_=st.secrets["TWILIO_WHATSAPP_NUMBER"],
             to=f"whatsapp:{phone}"
         )
+
         return True
     except:
         return False
+
+
+@st.cache_resource
+def load_whisper():
+    return whisper.load_model("base")
+
+
+whisper_model = load_whisper()
 
 
 st.sidebar.title("Tools")
@@ -140,63 +203,76 @@ chat_tab, admin_tab = st.tabs(["Chat Assistant", "Admin Dashboard"])
 with chat_tab:
     st.title("Clinic Assistant")
 
-    now = datetime.now()
-    today = now.strftime("%A, %Y-%m-%d")
-
     if "history" not in st.session_state:
         st.session_state.history = []
 
-    for msg in st.session_state.history:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+    audio = st.file_uploader("🎤 Voice Input (upload audio)", type=["wav", "mp3", "m4a"])
 
-    user_msg = st.chat_input("How can I help you?")
+    user_msg = None
+
+    if audio:
+        with open("temp.wav", "wb") as f:
+            f.write(audio.read())
+
+        result = whisper_model.transcribe("temp.wav")
+        user_msg = result["text"]
+        st.chat_message("user").markdown(user_msg)
+
+    text_input = st.chat_input("Type here...")
+
+    if text_input:
+        user_msg = text_input
 
     if user_msg:
         st.session_state.history.append({"role": "user", "content": user_msg})
-        with st.chat_message("user"):
-            st.markdown(user_msg)
+        st.chat_message("user").markdown(user_msg)
 
+        now = datetime.now()
         system_prompt = f"""
-You are a clinic receptionist. Today is {today}.
-All bookings must be for {now.year}.
-Format: [BOOKING: Name, Phone, DocID, YYYY-MM-DD HH:MM]
+You are a clinic receptionist.
+Today is {now.strftime("%A %Y-%m-%d")}.
+Return booking in format:
+[BOOKING: Name, Phone, DocID, YYYY-MM-DD HH:MM]
 Doctors: {DOCTORS}
 """
 
-        response = ai_client.chat.complete(
-            model="mistral-large-latest",
-            messages=[{"role": "system", "content": system_prompt}] + st.session_state.history
-        )
+        if ai_client:
+            response = ai_client.chat.complete(
+                model="mistral-large-latest",
+                messages=[{"role": "system", "content": system_prompt}] + st.session_state.history
+            )
 
-        reply = response.choices[0].message.content
+            reply = response.choices[0].message.content
+        else:
+            reply = "AI not configured."
 
-        with st.chat_message("assistant"):
-            st.markdown(reply)
+        st.chat_message("assistant").markdown(reply)
 
-        booking = re.search(r"\[BOOKING:(.*?)\]", reply)
-        if booking:
-            data = [x.strip() for x in booking.group(1).split(",")]
-            if len(data) == 4:
-                name, phone, doc, slot = data
+        match = re.search(r"\[BOOKING:(.*?)\]", reply)
+
+        if match:
+            parts = [p.strip() for p in match.group(1).split(",")]
+
+            if len(parts) == 4:
+                name, phone, doc, slot = parts
 
                 if "2023" in slot:
-                    slot = slot.replace("2023", str(now.year))
+                    slot = slot.replace("2023", str(datetime.now().year))
 
                 ok, err = book_appointment(name, phone, doc, slot)
 
                 if ok:
-                    st.success(f"Booked for {slot}")
+                    st.success("Booked successfully")
                     send_whatsapp(phone, name, DOCTORS[doc]["en"], slot)
-                    st.balloons()
                 else:
                     st.warning(err)
 
         cancel = re.search(r"\[CANCEL:(.*?)\]", reply)
+
         if cancel:
             name, doc = [x.strip() for x in cancel.group(1).split(",")]
             if cancel_appointment(name, doc):
-                st.success("Cancelled successfully")
+                st.success("Cancelled")
             else:
                 st.warning("Not found")
 
@@ -204,158 +280,20 @@ Doctors: {DOCTORS}
 
 
 with admin_tab:
-    st.subheader("Current Appointments")
+    st.subheader("Appointments")
 
     conn = db_connection()
     df = pd.read_sql_query("SELECT * FROM appointments", conn)
     conn.close()
 
-    if not df.empty:
-        st.metric("Total Bookings", len(df))
+    if len(df):
+        st.metric("Total", len(df))
 
         for doc_id, doc in DOCTORS.items():
-            subset = df[df["doc_id"] == doc_id]
+            sub = df[df["doc_id"] == doc_id]
 
-            with st.expander(f"{doc['en']} ({len(subset)})"):
-                if not subset.empty:
-                    st.table(subset[["patient_name", "phone", "slot"]])
-                else:
-                    st.write("No appointments")
-
-        if st.button("Clear All Data"):
-            conn = db_connection()
-            conn.execute("DELETE FROM appointments")
-            conn.commit()
-            conn.close()
-            st.rerun()
+            with st.expander(doc["en"]):
+                st.dataframe(sub)
 
     else:
-        st.info("No bookings found")
-
-DOCTOR_SCHEDULE = {
-    "1": {"start": 9, "end": 17, "days": [0,1,2,3,4]},
-    "2": {"start": 10, "end": 16, "days": [0,1,2,3,4]},
-    "3": {"start": 9, "end": 15, "days": [0,1,2,3,4]},
-    "4": {"start": 11, "end": 18, "days": [0,1,2,3,4]},
-    "5": {"start": 12, "end": 20, "days": [0,1,2,3,4]},
-    "6": {"start": 9, "end": 14, "days": [0,1,2,3,4]},
-    "7": {"start": 10, "end": 17, "days": [0,1,2,3,4]},
-    "8": {"start": 9, "end": 16, "days": [0,1,2,3,4]},
-    "9": {"start": 9, "end": 17, "days": [0,1,2,3,4]},
-    "10": {"start": 8, "end": 14, "days": [0,1,2,3,4]}
-}
-
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
-
-tz = ZoneInfo("Asia/Bahrain")
-
-
-def is_doctor_available(doc_id, slot):
-    try:
-        dt = datetime.strptime(slot, "%Y-%m-%d %H:%M")
-        dt = dt.replace(tzinfo=tz)
-
-        s = DOCTOR_SCHEDULE.get(doc_id)
-        if not s:
-            return True
-
-        if dt.weekday() not in s["days"]:
-            return False
-
-        if dt.hour < s["start"] or dt.hour >= s["end"]:
-            return False
-
-        if "break" in s:
-            b1, b2 = s["break"]
-            if b1 <= dt.hour < b2:
-                return False
-
-        return True
-
-    except:
-        return False
-
-
-def next_valid_slots(doc_id, slot):
-    try:
-        base = datetime.strptime(slot, "%Y-%m-%d %H:%M")
-        base = base.replace(tzinfo=tz)
-
-        out = []
-        step = 30
-
-        for i in range(1, 7):
-            t = base + timedelta(minutes=step * i)
-            t_str = t.strftime("%Y-%m-%d %H:%M")
-
-            if is_doctor_available(doc_id, t_str):
-                out.append(t_str)
-
-            if len(out) == 3:
-                break
-
-        return out
-
-    except:
-        return []
-
-
-def is_valid_future_time(slot):
-    try:
-        now = datetime.now(tz)
-        t = datetime.strptime(slot, "%Y-%m-%d %H:%M")
-        t = t.replace(tzinfo=tz)
-
-        return t > now
-
-    except:
-        return False
-
-
-def book_appointment(name, phone, doc_id, slot):
-    conn = db_connection()
-    cur = conn.cursor()
-
-    try:
-        name = name.strip().lower()
-        cur.execute("BEGIN IMMEDIATE")
-
-        if not is_valid_future_time(slot):
-            return False, "Pick a future time."
-
-        if not is_doctor_available(doc_id, slot):
-            alt = next_valid_slots(doc_id, slot)
-            return False, f"Doctor not available. Try {', '.join(alt) if alt else 'something else'}"
-
-        cur.execute(
-            "SELECT 1 FROM appointments WHERE doc_id=? AND slot=?",
-            (doc_id, slot)
-        )
-
-        if cur.fetchone():
-            alt = next_valid_slots(doc_id, slot)
-            return False, f"Already booked. Try {', '.join(alt)}"
-
-        cur.execute(
-            "INSERT INTO appointments (patient_name, phone, doc_id, slot) VALUES (?,?,?,?)",
-            (name, phone, doc_id, slot)
-        )
-
-        conn.commit()
-        return True, None
-
-    except Exception as e:
-        conn.rollback()
-        return False, str(e)
-
-    finally:
-        conn.close()
-
-def send_reminder(phone, name, doctor, slot):
-    msg = f"Reminder ⏰\nHi {name}, your appointment with {doctor} is at {slot}"
-    client.messages.create(
-        body=msg,
-        from_=st.secrets["TWILIO_WHATSAPP_NUMBER"],
-        to=f"whatsapp:{phone}"
-    )
+        st.info("No data")
