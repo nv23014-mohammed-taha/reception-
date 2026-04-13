@@ -187,7 +187,7 @@ st.sidebar.title("Tools")
 
 if os.path.exists(DB_PATH):
     with open(DB_PATH, "rb") as f:
-        st.sidebar.download_button("📥 Download Database", f, file_name="clinic_data.db")
+        st.sidebar.download_button("Download Database", f, file_name="clinic_data.db")
 
 
 chat_tab, admin_tab = st.tabs(["Chat Assistant", "Admin Dashboard"])
