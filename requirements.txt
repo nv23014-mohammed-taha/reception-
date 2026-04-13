@@ -5,3 +5,6 @@ pandas
 openai
 openai-whisper
 streamlit-audiorecorder
+sounddevice
+scipy
+numpy
