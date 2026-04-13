@@ -6,7 +6,6 @@ import pandas as pd
 from datetime import datetime, timedelta
 import os
 import re
-import whisper
 
 st.set_page_config(page_title="Clinic System", layout="wide")
 
@@ -45,6 +44,7 @@ def setup_database():
 
 setup_database()
 
+
 DOCTORS = {
     "1": {"en": "Dr. Faisal Al-Mahmood (Cardiology)", "ar": "د. فيصل المحمود (القلب)"},
     "2": {"en": "Dr. Mariam Al-Sayed (Pediatrics)", "ar": "د. مريم السيد (أطفال)"},
@@ -58,6 +58,7 @@ DOCTORS = {
     "10": {"en": "Dr. Ahmed Al-Aali (General Medicine)", "ar": "د. أحمد العالي (طب عام)"}
 }
 
+
 DOCTOR_SCHEDULE = {
     "1": {"start": 9, "end": 17, "days": [0,1,2,3,4]},
     "2": {"start": 10, "end": 16, "days": [0,1,2,3,4]},
@@ -70,9 +71,6 @@ DOCTOR_SCHEDULE = {
     "9": {"start": 9, "end": 17, "days": [0,1,2,3,4]},
     "10": {"start": 8, "end": 14, "days": [0,1,2,3,4]}
 }
-
-
-tz = datetime.now().astimezone().tzinfo
 
 
 def is_future(slot):
@@ -104,7 +102,10 @@ def doctor_available(doc_id, slot):
 def next_slots(slot):
     try:
         base = datetime.strptime(slot, "%Y-%m-%d %H:%M")
-        return [(base + timedelta(minutes=30*i)).strftime("%Y-%m-%d %H:%M") for i in range(1,4)]
+        return [
+            (base + timedelta(minutes=30 * i)).strftime("%Y-%m-%d %H:%M")
+            for i in range(1, 4)
+        ]
     except:
         return []
 
@@ -182,14 +183,6 @@ def send_whatsapp(phone, name, doctor, slot):
         return False
 
 
-@st.cache_resource
-def load_whisper():
-    return whisper.load_model("base")
-
-
-whisper_model = load_whisper()
-
-
 st.sidebar.title("Tools")
 
 if os.path.exists(DB_PATH):
@@ -206,28 +199,18 @@ with chat_tab:
     if "history" not in st.session_state:
         st.session_state.history = []
 
-    audio = st.file_uploader("🎤 Voice Input (upload audio)", type=["wav", "mp3", "m4a"])
+    for msg in st.session_state.history:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
-    user_msg = None
-
-    if audio:
-        with open("temp.wav", "wb") as f:
-            f.write(audio.read())
-
-        result = whisper_model.transcribe("temp.wav")
-        user_msg = result["text"]
-        st.chat_message("user").markdown(user_msg)
-
-    text_input = st.chat_input("Type here...")
-
-    if text_input:
-        user_msg = text_input
+    user_msg = st.chat_input("How can I help you?")
 
     if user_msg:
         st.session_state.history.append({"role": "user", "content": user_msg})
         st.chat_message("user").markdown(user_msg)
 
         now = datetime.now()
+
         system_prompt = f"""
 You are a clinic receptionist.
 Today is {now.strftime("%A %Y-%m-%d")}.
@@ -239,9 +222,9 @@ Doctors: {DOCTORS}
         if ai_client:
             response = ai_client.chat.complete(
                 model="mistral-large-latest",
-                messages=[{"role": "system", "content": system_prompt}] + st.session_state.history
+                messages=[{"role": "system", "content": system_prompt}]
+                + st.session_state.history
             )
-
             reply = response.choices[0].message.content
         else:
             reply = "AI not configured."
@@ -257,7 +240,7 @@ Doctors: {DOCTORS}
                 name, phone, doc, slot = parts
 
                 if "2023" in slot:
-                    slot = slot.replace("2023", str(datetime.now().year))
+                    slot = slot.replace("2023", str(now.year))
 
                 ok, err = book_appointment(name, phone, doc, slot)
 
@@ -271,8 +254,9 @@ Doctors: {DOCTORS}
 
         if cancel:
             name, doc = [x.strip() for x in cancel.group(1).split(",")]
+
             if cancel_appointment(name, doc):
-                st.success("Cancelled")
+                st.success("Cancelled successfully")
             else:
                 st.warning("Not found")
 
@@ -296,4 +280,4 @@ with admin_tab:
                 st.dataframe(sub)
 
     else:
-        st.info("No data")
+        st.info("No bookings found")
