@@ -172,24 +172,22 @@ def send_whatsapp(phone, name, doctor, slot):
 
         msg = f"Appointment Confirmed\n\n{name}\n{doctor}\n{slot}"
 
-        message = client.messages.create(
+        client.messages.create(
             body=msg,
             from_=st.secrets["TWILIO_WHATSAPP_NUMBER"],
             to=f"whatsapp:{phone}"
         )
 
-        st.write("Twilio SID:", message.sid)  # DEBUG
         return True
-
-    except Exception as e:
-        st.error(f"Twilio error: {e}")  # SHOW REAL ERROR
+    except:
         return False
+
 
 st.sidebar.title("Tools")
 
 if os.path.exists(DB_PATH):
     with open(DB_PATH, "rb") as f:
-        st.sidebar.download_button(" Download Database", f, file_name="clinic_data.db")
+        st.sidebar.download_button("📥 Download Database", f, file_name="clinic_data.db")
 
 
 chat_tab, admin_tab = st.tabs(["Chat Assistant", "Admin Dashboard"])
