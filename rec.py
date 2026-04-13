@@ -6,10 +6,8 @@ import pandas as pd
 from datetime import datetime, timedelta
 import os
 import re
-import sounddevice as sd
-from scipy.io.wavfile import write
-from openai import OpenAI
 import tempfile
+from openai import OpenAI
 
 st.set_page_config(page_title="Clinic System", layout="wide")
 
@@ -22,7 +20,6 @@ ai_client = None
 if "MISTRAL_API_KEY" in st.secrets:
     ai_client = Mistral(api_key=st.secrets["MISTRAL_API_KEY"])
 
-# ================= VOICE CLIENT =================
 voice_client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 
@@ -178,27 +175,21 @@ def send_whatsapp(phone, name, doctor, slot):
         return False
 
 
-# ================= VOICE FEATURE (ONLY ADDITION) =================
-def record_voice():
-    fs = 44100
-    duration = 5
+# ================= VOICE FEATURE (FIXED - NO EXTRA LIBRARIES) =================
+def transcribe_audio(audio_bytes):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
+        tmp.write(audio_bytes)
+        tmp_path = tmp.name
 
-    st.info("Recording... speak now")
-
-    recording = sd.rec(int(duration * fs), samplerate=fs, channels=1)
-    sd.wait()
-
-    file_path = "voice.wav"
-    write(file_path, fs, recording)
-
-    with open(file_path, "rb") as f:
+    with open(tmp_path, "rb") as f:
         result = voice_client.audio.transcriptions.create(
             model="whisper-1",
             file=f
         )
-
     return result.text
 
+
+# ================= UI =================
 
 st.sidebar.title("Tools")
 
@@ -216,21 +207,23 @@ with chat_tab:
     if "history" not in st.session_state:
         st.session_state.history = []
 
+    # AUDIO INPUT BUTTON (NO ERRORS, BUILT-IN STREAMLIT)
+    audio = st.audio_input("Record Voice Message")
     voice_text = None
 
-    # 🎤 ONLY NEW UI ELEMENT
-    if st.button("🎤 Record Voice"):
-        voice_text = record_voice()
-        st.success("Transcribed Voice")
+    if audio is not None:
+        voice_text = transcribe_audio(audio.getvalue())
+        st.success("Voice converted to text")
         st.write(voice_text)
 
     for msg in st.session_state.history:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    text_input = st.chat_input("How can I help you?")
+    user_msg = st.chat_input("How can I help you?")
 
-    user_msg = voice_text if voice_text else text_input
+    if voice_text:
+        user_msg = voice_text
 
     if user_msg:
         st.session_state.history.append({"role": "user", "content": user_msg})
@@ -241,18 +234,20 @@ with chat_tab:
         system_prompt = f"""
 You are a clinic receptionist.
 Today is {now.strftime("%A %Y-%m-%d")}.
-Return booking format:
+Return booking in format:
 [BOOKING: Name, Phone, DocID, YYYY-MM-DD HH:MM]
 Doctors: {DOCTORS}
 """
 
-        response = ai_client.chat.complete(
-            model="mistral-large-latest",
-            messages=[{"role": "system", "content": system_prompt}]
-            + st.session_state.history
-        )
-
-        reply = response.choices[0].message.content
+        if ai_client:
+            response = ai_client.chat.complete(
+                model="mistral-large-latest",
+                messages=[{"role": "system", "content": system_prompt}]
+                + st.session_state.history
+            )
+            reply = response.choices[0].message.content
+        else:
+            reply = "AI not configured."
 
         st.chat_message("assistant").markdown(reply)
 
@@ -263,6 +258,9 @@ Doctors: {DOCTORS}
 
             if len(parts) == 4:
                 name, phone, doc, slot = parts
+
+                if "2023" in slot:
+                    slot = slot.replace("2023", str(now.year))
 
                 ok, err = book_appointment(name, phone, doc, slot)
 
@@ -279,6 +277,8 @@ Doctors: {DOCTORS}
 
             if cancel_appointment(name, doc):
                 st.success("Cancelled successfully")
+            else:
+                st.warning("Not found")
 
         st.session_state.history.append({"role": "assistant", "content": reply})
 
