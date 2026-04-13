@@ -6,8 +6,10 @@ import pandas as pd
 from datetime import datetime, timedelta
 import os
 import re
-import tempfile
+import sounddevice as sd
+from scipy.io.wavfile import write
 from openai import OpenAI
+import tempfile
 
 st.set_page_config(page_title="Clinic System", layout="wide")
 
@@ -20,6 +22,7 @@ ai_client = None
 if "MISTRAL_API_KEY" in st.secrets:
     ai_client = Mistral(api_key=st.secrets["MISTRAL_API_KEY"])
 
+# ================= VOICE CLIENT =================
 voice_client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 
@@ -64,16 +67,16 @@ DOCTORS = {
 
 
 DOCTOR_SCHEDULE = {
-    "1": {"start": 8, "end": 21, "days": [6,0,1,2,3]},  # Sun-Thu
-    "2": {"start": 8, "end": 21, "days": [6,0,1,2,3]},
-    "3": {"start": 8, "end": 21, "days": [6,0,1,2,3]},
-    "4": {"start": 8, "end": 21, "days": [6,0,1,2,3]},
-    "5": {"start": 8, "end": 21, "days": [6,0,1,2,3]},
-    "6": {"start": 8, "end": 21, "days": [6,0,1,2,3]},
-    "7": {"start": 8, "end": 21, "days": [6,0,1,2,3]},
-    "8": {"start": 8, "end": 21, "days": [6,0,1,2,3]},
-    "9": {"start": 8, "end": 21, "days": [6,0,1,2,3]},
-    "10": {"start": 8, "end": 21, "days": [6,0,1,2,3]}
+    "1": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
+    "2": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
+    "3": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
+    "4": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
+    "5": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
+    "6": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
+    "7": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
+    "8": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
+    "9": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
+    "10": {"start": 9, "end": 18, "days": [0,1,2,3,4]}
 }
 
 
@@ -125,7 +128,10 @@ def book_appointment(name, phone, doc_id, slot):
         if not doctor_available(doc_id, slot):
             return False, f"Doctor not available. Try: {', '.join(next_slots(slot))}"
 
-        cur.execute("SELECT 1 FROM appointments WHERE doc_id=? AND slot=?", (doc_id, slot))
+        cur.execute(
+            "SELECT 1 FROM appointments WHERE doc_id=? AND slot=?",
+            (doc_id, slot)
+        )
 
         if cur.fetchone():
             return False, f"Slot taken. Try: {', '.join(next_slots(slot))}"
@@ -172,13 +178,20 @@ def send_whatsapp(phone, name, doctor, slot):
         return False
 
 
-# ================= VOICE FEATURE (FIXED) =================
-def transcribe_audio(audio_bytes):
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-        tmp.write(audio_bytes)
-        tmp_path = tmp.name
+# ================= VOICE FEATURE (ONLY ADDITION) =================
+def record_voice():
+    fs = 44100
+    duration = 5
 
-    with open(tmp_path, "rb") as f:
+    st.info("Recording... speak now")
+
+    recording = sd.rec(int(duration * fs), samplerate=fs, channels=1)
+    sd.wait()
+
+    file_path = "voice.wav"
+    write(file_path, fs, recording)
+
+    with open(file_path, "rb") as f:
         result = voice_client.audio.transcriptions.create(
             model="whisper-1",
             file=f
@@ -186,8 +199,6 @@ def transcribe_audio(audio_bytes):
 
     return result.text
 
-
-# ================= UI =================
 
 st.sidebar.title("Tools")
 
@@ -205,14 +216,13 @@ with chat_tab:
     if "history" not in st.session_state:
         st.session_state.history = []
 
-    # 🎤 VOICE BUTTON (NO FILE UPLOAD)
-    audio = st.audio_input("Click to record voice")
-
     voice_text = None
-    if audio:
-        voice_text = transcribe_audio(audio.getvalue())
+
+    # 🎤 ONLY NEW UI ELEMENT
+    if st.button("🎤 Record Voice"):
+        voice_text = record_voice()
         st.success("Transcribed Voice")
-        st.info(voice_text)
+        st.write(voice_text)
 
     for msg in st.session_state.history:
         with st.chat_message(msg["role"]):
@@ -231,20 +241,18 @@ with chat_tab:
         system_prompt = f"""
 You are a clinic receptionist.
 Today is {now.strftime("%A %Y-%m-%d")}.
-Return booking in format:
+Return booking format:
 [BOOKING: Name, Phone, DocID, YYYY-MM-DD HH:MM]
 Doctors: {DOCTORS}
 """
 
-        if ai_client:
-            response = ai_client.chat.complete(
-                model="mistral-large-latest",
-                messages=[{"role": "system", "content": system_prompt}]
-                + st.session_state.history
-            )
-            reply = response.choices[0].message.content
-        else:
-            reply = "AI not configured."
+        response = ai_client.chat.complete(
+            model="mistral-large-latest",
+            messages=[{"role": "system", "content": system_prompt}]
+            + st.session_state.history
+        )
+
+        reply = response.choices[0].message.content
 
         st.chat_message("assistant").markdown(reply)
 
@@ -271,8 +279,6 @@ Doctors: {DOCTORS}
 
             if cancel_appointment(name, doc):
                 st.success("Cancelled successfully")
-            else:
-                st.warning("Not found")
 
         st.session_state.history.append({"role": "assistant", "content": reply})
 
