@@ -8,7 +8,6 @@ import os
 import re
 import tempfile
 from openai import OpenAI
-from streamlit_audiorecorder import audiorecorder
 
 st.set_page_config(page_title="Clinic System", layout="wide")
 
@@ -17,7 +16,10 @@ language = st.sidebar.selectbox("Language / اللغة", ["English", "العرب
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "hospital_management.db")
 
-ai_client = Mistral(api_key=st.secrets["MISTRAL_API_KEY"]) if "MISTRAL_API_KEY" in st.secrets else None
+ai_client = None
+if "MISTRAL_API_KEY" in st.secrets:
+    ai_client = Mistral(api_key=st.secrets["MISTRAL_API_KEY"])
+
 voice_client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 
@@ -62,16 +64,16 @@ DOCTORS = {
 
 
 DOCTOR_SCHEDULE = {
-    "1": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "2": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "3": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "4": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "5": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "6": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "7": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "8": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "9": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "10": {"start": 9, "end": 18, "days": [0,1,2,3,4]}
+    "1": {"start": 8, "end": 21, "days": [6,0,1,2,3]},  # Sun-Thu
+    "2": {"start": 8, "end": 21, "days": [6,0,1,2,3]},
+    "3": {"start": 8, "end": 21, "days": [6,0,1,2,3]},
+    "4": {"start": 8, "end": 21, "days": [6,0,1,2,3]},
+    "5": {"start": 8, "end": 21, "days": [6,0,1,2,3]},
+    "6": {"start": 8, "end": 21, "days": [6,0,1,2,3]},
+    "7": {"start": 8, "end": 21, "days": [6,0,1,2,3]},
+    "8": {"start": 8, "end": 21, "days": [6,0,1,2,3]},
+    "9": {"start": 8, "end": 21, "days": [6,0,1,2,3]},
+    "10": {"start": 8, "end": 21, "days": [6,0,1,2,3]}
 }
 
 
@@ -124,6 +126,7 @@ def book_appointment(name, phone, doc_id, slot):
             return False, f"Doctor not available. Try: {', '.join(next_slots(slot))}"
 
         cur.execute("SELECT 1 FROM appointments WHERE doc_id=? AND slot=?", (doc_id, slot))
+
         if cur.fetchone():
             return False, f"Slot taken. Try: {', '.join(next_slots(slot))}"
 
@@ -170,17 +173,17 @@ def send_whatsapp(phone, name, doctor, slot):
 
 
 # ================= VOICE FEATURE (FIXED) =================
-
-def transcribe_audio(audio_file):
+def transcribe_audio(audio_bytes):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-        tmp.write(audio_file.read())
-        path = tmp.name
+        tmp.write(audio_bytes)
+        tmp_path = tmp.name
 
-    with open(path, "rb") as f:
+    with open(tmp_path, "rb") as f:
         result = voice_client.audio.transcriptions.create(
             model="whisper-1",
             file=f
         )
+
     return result.text
 
 
@@ -202,32 +205,22 @@ with chat_tab:
     if "history" not in st.session_state:
         st.session_state.history = []
 
-    # VOICE RECORD BUTTON
-    st.subheader("Voice Input")
-    audio = audiorecorder("Tap to record", "Recording...")
+    # 🎤 VOICE BUTTON (NO FILE UPLOAD)
+    audio = st.audio_input("Click to record voice")
 
     voice_text = None
-    if len(audio) > 0:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-            audio.export(tmp.name, format="wav")
-
-            with open(tmp.name, "rb") as f:
-                voice_text = voice_client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=f
-                ).text
-
-        st.success("Transcribed")
-        st.write(voice_text)
+    if audio:
+        voice_text = transcribe_audio(audio.getvalue())
+        st.success("Transcribed Voice")
+        st.info(voice_text)
 
     for msg in st.session_state.history:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    user_msg = st.chat_input("How can I help you?")
+    text_input = st.chat_input("How can I help you?")
 
-    if voice_text:
-        user_msg = voice_text
+    user_msg = voice_text if voice_text else text_input
 
     if user_msg:
         st.session_state.history.append({"role": "user", "content": user_msg})
@@ -243,24 +236,25 @@ Return booking in format:
 Doctors: {DOCTORS}
 """
 
-        response = ai_client.chat.complete(
-            model="mistral-large-latest",
-            messages=[{"role": "system", "content": system_prompt}] + st.session_state.history
-        )
-
-        reply = response.choices[0].message.content
+        if ai_client:
+            response = ai_client.chat.complete(
+                model="mistral-large-latest",
+                messages=[{"role": "system", "content": system_prompt}]
+                + st.session_state.history
+            )
+            reply = response.choices[0].message.content
+        else:
+            reply = "AI not configured."
 
         st.chat_message("assistant").markdown(reply)
 
         match = re.search(r"\[BOOKING:(.*?)\]", reply)
+
         if match:
             parts = [p.strip() for p in match.group(1).split(",")]
 
             if len(parts) == 4:
                 name, phone, doc, slot = parts
-
-                if "2023" in slot:
-                    slot = slot.replace("2023", str(now.year))
 
                 ok, err = book_appointment(name, phone, doc, slot)
 
@@ -271,9 +265,14 @@ Doctors: {DOCTORS}
                     st.warning(err)
 
         cancel = re.search(r"\[CANCEL:(.*?)\]", reply)
+
         if cancel:
             name, doc = [x.strip() for x in cancel.group(1).split(",")]
-            cancel_appointment(name, doc)
+
+            if cancel_appointment(name, doc):
+                st.success("Cancelled successfully")
+            else:
+                st.warning("Not found")
 
         st.session_state.history.append({"role": "assistant", "content": reply})
 
@@ -290,7 +289,9 @@ with admin_tab:
 
         for doc_id, doc in DOCTORS.items():
             sub = df[df["doc_id"] == doc_id]
+
             with st.expander(doc["en"]):
                 st.dataframe(sub)
+
     else:
         st.info("No bookings found")
