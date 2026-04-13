@@ -6,6 +6,8 @@ import pandas as pd
 from datetime import datetime, timedelta
 import os
 import re
+import tempfile
+from openai import OpenAI
 
 st.set_page_config(page_title="Clinic System", layout="wide")
 
@@ -17,6 +19,8 @@ DB_PATH = os.path.join(BASE_DIR, "hospital_management.db")
 ai_client = None
 if "MISTRAL_API_KEY" in st.secrets:
     ai_client = Mistral(api_key=st.secrets["MISTRAL_API_KEY"])
+
+voice_client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 
 def db_connection():
@@ -102,10 +106,7 @@ def doctor_available(doc_id, slot):
 def next_slots(slot):
     try:
         base = datetime.strptime(slot, "%Y-%m-%d %H:%M")
-        return [
-            (base + timedelta(minutes=30 * i)).strftime("%Y-%m-%d %H:%M")
-            for i in range(1, 4)
-        ]
+        return [(base + timedelta(minutes=30 * i)).strftime("%Y-%m-%d %H:%M") for i in range(1, 4)]
     except:
         return []
 
@@ -151,16 +152,10 @@ def book_appointment(name, phone, doc_id, slot):
 def cancel_appointment(name, doc_id):
     conn = db_connection()
     cur = conn.cursor()
-    try:
-        name = name.strip().lower()
-        cur.execute(
-            "DELETE FROM appointments WHERE patient_name=? AND doc_id=?",
-            (name, doc_id)
-        )
-        conn.commit()
-        return cur.rowcount > 0
-    finally:
-        conn.close()
+    cur.execute("DELETE FROM appointments WHERE patient_name=? AND doc_id=?", (name.strip().lower(), doc_id))
+    conn.commit()
+    conn.close()
+    return True
 
 
 def send_whatsapp(phone, name, doctor, slot):
@@ -170,18 +165,31 @@ def send_whatsapp(phone, name, doctor, slot):
             st.secrets["TWILIO_AUTH_TOKEN"]
         )
 
-        msg = f"Appointment Confirmed\n\n{name}\n{doctor}\n{slot}"
-
         client.messages.create(
-            body=msg,
+            body=f"Appointment Confirmed\n{name}\n{doctor}\n{slot}",
             from_=st.secrets["TWILIO_WHATSAPP_NUMBER"],
             to=f"whatsapp:{phone}"
         )
-
         return True
     except:
         return False
 
+
+# ================= VOICE FEATURE (FIXED - NO EXTRA LIBRARIES) =================
+def transcribe_audio(audio_bytes):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
+        tmp.write(audio_bytes)
+        tmp_path = tmp.name
+
+    with open(tmp_path, "rb") as f:
+        result = voice_client.audio.transcriptions.create(
+            model="whisper-1",
+            file=f
+        )
+    return result.text
+
+
+# ================= UI =================
 
 st.sidebar.title("Tools")
 
@@ -199,11 +207,23 @@ with chat_tab:
     if "history" not in st.session_state:
         st.session_state.history = []
 
+    # AUDIO INPUT BUTTON (NO ERRORS, BUILT-IN STREAMLIT)
+    audio = st.audio_input("Record Voice Message")
+    voice_text = None
+
+    if audio is not None:
+        voice_text = transcribe_audio(audio.getvalue())
+        st.success("Voice converted to text")
+        st.write(voice_text)
+
     for msg in st.session_state.history:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
     user_msg = st.chat_input("How can I help you?")
+
+    if voice_text:
+        user_msg = voice_text
 
     if user_msg:
         st.session_state.history.append({"role": "user", "content": user_msg})
