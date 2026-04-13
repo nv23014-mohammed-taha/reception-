@@ -8,6 +8,7 @@ import os
 import re
 import tempfile
 from openai import OpenAI
+from audiorecorder import audiorecorder
 
 st.set_page_config(page_title="Clinic System", layout="wide")
 
@@ -16,10 +17,7 @@ language = st.sidebar.selectbox("Language / اللغة", ["English", "العرب
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "hospital_management.db")
 
-ai_client = None
-if "MISTRAL_API_KEY" in st.secrets:
-    ai_client = Mistral(api_key=st.secrets["MISTRAL_API_KEY"])
-
+ai_client = Mistral(api_key=st.secrets["MISTRAL_API_KEY"]) if "MISTRAL_API_KEY" in st.secrets else None
 voice_client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 
@@ -125,11 +123,7 @@ def book_appointment(name, phone, doc_id, slot):
         if not doctor_available(doc_id, slot):
             return False, f"Doctor not available. Try: {', '.join(next_slots(slot))}"
 
-        cur.execute(
-            "SELECT 1 FROM appointments WHERE doc_id=? AND slot=?",
-            (doc_id, slot)
-        )
-
+        cur.execute("SELECT 1 FROM appointments WHERE doc_id=? AND slot=?", (doc_id, slot))
         if cur.fetchone():
             return False, f"Slot taken. Try: {', '.join(next_slots(slot))}"
 
@@ -175,13 +169,14 @@ def send_whatsapp(phone, name, doctor, slot):
         return False
 
 
-# ================= VOICE FEATURE =================
-def transcribe_audio(file):
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
-        tmp.write(file.read())
-        tmp_path = tmp.name
+# ================= VOICE FEATURE (FIXED) =================
 
-    with open(tmp_path, "rb") as f:
+def transcribe_audio(audio_file):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+        tmp.write(audio_file.read())
+        path = tmp.name
+
+    with open(path, "rb") as f:
         result = voice_client.audio.transcriptions.create(
             model="whisper-1",
             file=f
@@ -207,11 +202,21 @@ with chat_tab:
     if "history" not in st.session_state:
         st.session_state.history = []
 
-    audio = st.file_uploader("🎤 Voice Input", type=["wav", "mp3", "m4a"])
-    voice_text = None
+    # VOICE RECORD BUTTON
+    st.subheader("Voice Input")
+    audio = audiorecorder("Tap to record", "Recording...")
 
-    if audio:
-        voice_text = transcribe_audio(audio)
+    voice_text = None
+    if len(audio) > 0:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+            audio.export(tmp.name, format="wav")
+
+            with open(tmp.name, "rb") as f:
+                voice_text = voice_client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=f
+                ).text
+
         st.success("Transcribed")
         st.write(voice_text)
 
@@ -238,20 +243,16 @@ Return booking in format:
 Doctors: {DOCTORS}
 """
 
-        if ai_client:
-            response = ai_client.chat.complete(
-                model="mistral-large-latest",
-                messages=[{"role": "system", "content": system_prompt}]
-                + st.session_state.history
-            )
-            reply = response.choices[0].message.content
-        else:
-            reply = "AI not configured."
+        response = ai_client.chat.complete(
+            model="mistral-large-latest",
+            messages=[{"role": "system", "content": system_prompt}] + st.session_state.history
+        )
+
+        reply = response.choices[0].message.content
 
         st.chat_message("assistant").markdown(reply)
 
         match = re.search(r"\[BOOKING:(.*?)\]", reply)
-
         if match:
             parts = [p.strip() for p in match.group(1).split(",")]
 
@@ -270,14 +271,9 @@ Doctors: {DOCTORS}
                     st.warning(err)
 
         cancel = re.search(r"\[CANCEL:(.*?)\]", reply)
-
         if cancel:
             name, doc = [x.strip() for x in cancel.group(1).split(",")]
-
-            if cancel_appointment(name, doc):
-                st.success("Cancelled successfully")
-            else:
-                st.warning("Not found")
+            cancel_appointment(name, doc)
 
         st.session_state.history.append({"role": "assistant", "content": reply})
 
@@ -294,9 +290,7 @@ with admin_tab:
 
         for doc_id, doc in DOCTORS.items():
             sub = df[df["doc_id"] == doc_id]
-
             with st.expander(doc["en"]):
                 st.dataframe(sub)
-
     else:
         st.info("No bookings found")
