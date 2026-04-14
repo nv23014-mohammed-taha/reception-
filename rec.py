@@ -174,20 +174,31 @@ def send_whatsapp(phone, name, doctor, slot):
     except:
         return False
 
+# ── Replace this block in chat_tab ──────────────────────────────────────────
 
-# ================= VOICE FEATURE (FIXED - NO EXTRA LIBRARIES) =================
-def transcribe_audio(audio_bytes):
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
-        tmp.write(audio_bytes)
-        tmp_path = tmp.name
+# 1. Audio input
+audio = st.audio_input("Record Voice Message")
 
-    with open(tmp_path, "rb") as f:
-        result = voice_client.audio.transcriptions.create(
-            model="whisper-1",
-            file=f
-        )
-    return result.text
+if audio is not None:
+    transcribed = transcribe_audio(audio.getvalue())
+    st.session_state["voice_pending"] = transcribed   # store it
+    st.success("Voice converted to text")
+    st.write(transcribed)
 
+# 2. Show chat history
+for msg in st.session_state.history:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+# 3. Resolve input — prefer typed, fall back to pending voice
+user_msg = st.chat_input("How can I help you?")
+
+if not user_msg and st.session_state.get("voice_pending"):
+    user_msg = st.session_state.pop("voice_pending")   # consume it once
+
+# 4. Process
+if user_msg:
+    ...  # rest of your existing logic unchanged
 
 # ================= UI =================
 
