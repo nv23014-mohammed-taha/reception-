@@ -210,7 +210,7 @@ def transcribe_audio(audio_bytes):
         audio = r.record(src)
 
     try:
-        text = r.recognize_google(audio)
+        text = r.recognize_google(audio, language="ar-SA" if language=="العربية" else "en-US")
     except:
         text = "Could not understand"
 
@@ -220,23 +220,31 @@ def transcribe_audio(audio_bytes):
 
 st.sidebar.title("Navigation")
 
-chat_tab, admin_tab = st.tabs(["Chat Assistant", "Administration Panel"])
+if os.path.exists(DB_PATH):
+    with open(DB_PATH, "rb") as f:
+        st.sidebar.download_button("Download Database", f, file_name="clinic_data.db")
+
+
+chat_tab, admin_tab = st.tabs(
+    ["Chat Assistant", "Administration Panel"] if language == "English"
+    else ["المساعد", "لوحة الإدارة"]
+)
 
 
 with chat_tab:
 
-    st.title("Clinic Assistant")
+    st.title("Clinic Assistant" if language == "English" else "مساعد العيادة")
 
     if "history" not in st.session_state:
         st.session_state.history = []
 
-    audio = st.audio_input("🎤 Speak")
+    audio = st.audio_input("🎤 Speak" if language == "English" else "🎤 تحدث")
 
     if audio:
         txt = transcribe_audio(audio.getvalue())
         st.session_state["voice_pending"] = txt
 
-    user_msg = st.chat_input("Type...")
+    user_msg = st.chat_input("Type..." if language == "English" else "اكتب هنا")
 
     if not user_msg and st.session_state.get("voice_pending"):
         user_msg = st.session_state.pop("voice_pending")
@@ -286,7 +294,7 @@ Doctors: {DOCTORS}
 
 with admin_tab:
 
-    st.subheader("Administration Panel")
+    st.subheader("Administration Panel" if language == "English" else "لوحة الإدارة")
 
     conn = db_connection()
     df = pd.read_sql_query("SELECT * FROM appointments", conn)
@@ -294,9 +302,13 @@ with admin_tab:
 
     st.metric("Total Appointments", len(df))
 
-    st.markdown("Doctor Schedule")
+    if st.button("⬇ Download Database"):
+        with open(DB_PATH, "rb") as f:
+            st.download_button("Download DB File", f, file_name="clinic_data.db")
 
-    doc = st.selectbox("Doctor", list(DOCTORS.keys()), format_func=lambda x: DOCTORS[x]["en"])
+    st.markdown("### Doctor Schedule" if language=="English" else "### جدول الأطباء")
+
+    doc = st.selectbox("Doctor", list(DOCTORS.keys()), format_func=lambda x: DOCTORS[x][language=="ar" and "ar" or "en"])
 
     s = get_schedule(doc)
 
