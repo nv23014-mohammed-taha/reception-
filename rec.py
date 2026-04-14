@@ -14,6 +14,7 @@ language = st.sidebar.selectbox("Language / اللغة", ["English", "العرب
 def t(en, ar):
     return ar if language == "العربية" else en
 
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "hospital_management.db")
 
@@ -91,14 +92,6 @@ def get_schedule(doc_id):
     conn.close()
 
     return DEFAULT_SCHEDULE
-
-
-def save_schedule(doc_id, start, end):
-    conn = db_connection()
-    cur = conn.cursor()
-    cur.execute("REPLACE INTO doctor_schedule VALUES (?,?,?)", (doc_id, start, end))
-    conn.commit()
-    conn.close()
 
 
 def is_future(slot):
@@ -226,10 +219,20 @@ def transcribe_audio(audio_bytes):
 
 st.sidebar.title(t("Navigation", "التنقل"))
 
+if os.path.exists(DB_PATH):
+    with open(DB_PATH, "rb") as f:
+        st.sidebar.download_button(
+            t("Download Database", "تحميل قاعدة البيانات"),
+            f,
+            file_name="clinic.db"
+        )
+
+
 chat_tab, admin_tab = st.tabs([t("Chat", "المحادثة"), t("Administration", "الإدارة")])
 
 
 with chat_tab:
+
     st.title(t("Clinic Assistant", "مساعد العيادة"))
 
     if "history" not in st.session_state:
@@ -249,11 +252,44 @@ with chat_tab:
     if user_msg:
         st.session_state.history.append({"role": "user", "content": user_msg})
 
-        st.chat_message("user").markdown(user_msg)
-        st.chat_message("assistant").markdown("...")
+        system_prompt = f"""
+Doctors work Sun–Thu 9AM–6PM.
+Never suggest past times.
 
-        st.session_state.history.append({"role": "assistant", "content": "..."})
+Doctors:
+{DOCTORS}
+"""
 
+        if ai_client:
+            res = ai_client.chat.complete(
+                model="mistral-large-latest",
+                messages=[{"role": "system", "content": system_prompt}]
+                + st.session_state.history
+            )
+            reply = res.choices[0].message.content
+        else:
+            reply = "AI off"
+
+        st.chat_message("assistant").markdown(reply)
+
+        b = re.search(r"\[BOOKING:(.*?)\]", reply)
+        if b:
+            n,p,d,s = [x.strip() for x in b.group(1).split(",")]
+            ok,_ = book_appointment(n,p,d,s)
+            if ok:
+                send_whatsapp(p,n,DOCTORS[d]["en"],s)
+
+        c = re.search(r"\[CANCEL:(.*?)\]", reply)
+        if c:
+            n,d = [x.strip() for x in c.group(1).split(",")]
+            cancel_appointment(n,d)
+
+        r = re.search(r"\[RESCHEDULE:(.*?)\]", reply)
+        if r:
+            n,d,s = [x.strip() for x in r.group(1).split(",")]
+            reschedule_appointment(n,d,s)
+
+        st.session_state.history.append({"role": "assistant", "content": reply})
 
 
 with admin_tab:
@@ -266,21 +302,29 @@ with admin_tab:
 
     st.metric(t("Total Appointments", "إجمالي المواعيد"), len(df))
 
-    st.markdown("### Doctor Schedule Editor")
+    st.markdown("### " + t("Doctor Schedule Editor", "تعديل جدول الأطباء"))
 
-    doc = st.selectbox("Doctor", list(DOCTORS.keys()),
-                        format_func=lambda x: DOCTORS[x]["en"])
+    doc = st.selectbox(
+        t("Select Doctor", "اختر الطبيب"),
+        list(DOCTORS.keys()),
+        format_func=lambda x: DOCTORS[x]["en"]
+    )
 
     s = get_schedule(doc)
 
-    start = st.number_input("Start Hour", 0, 23, s["start"])
-    end = st.number_input("End Hour", 0, 23, s["end"])
+    start = st.number_input(t("Start Hour", "بداية الدوام"), 0, 23, s["start"])
+    end = st.number_input(t("End Hour", "نهاية الدوام"), 0, 23, s["end"])
 
-    if st.button("Save Schedule"):
-        save_schedule(doc, start, end)
-        st.success("Schedule Updated")
+    if st.button(t("Save Schedule", "حفظ الجدول")):
+        conn = db_connection()
+        cur = conn.cursor()
+        cur.execute("REPLACE INTO doctor_schedule VALUES (?,?,?)", (doc, start, end))
+        conn.commit()
+        conn.close()
+        st.success(t("Updated", "تم التحديث"))
 
-    st.markdown("### All Appointments")
+    st.markdown("### " + t("All Appointments", "كل المواعيد"))
+
     for d in DOCTORS:
         with st.expander(DOCTORS[d]["en"]):
             st.dataframe(df[df["doc_id"] == d])
