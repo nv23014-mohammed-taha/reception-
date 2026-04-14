@@ -3,4 +3,5 @@ mistralai
 twilio
 pandas
 openai
+SpeechRecognition
 openai-whisper
