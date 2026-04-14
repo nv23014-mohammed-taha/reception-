@@ -11,16 +11,15 @@ st.set_page_config(page_title="Clinic System", layout="wide")
 
 language = st.sidebar.selectbox("Language / اللغة", ["English", "العربية"])
 
+def t(en, ar):
+    return ar if language == "العربية" else en
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "hospital_management.db")
 
 ai_client = None
 if "MISTRAL_API_KEY" in st.secrets:
     ai_client = Mistral(api_key=st.secrets["MISTRAL_API_KEY"])
-
-
-def t(en, ar):
-    return ar if language == "العربية" else en
 
 
 def db_connection():
@@ -110,40 +109,9 @@ def doctor_available(doc_id, slot):
         return False
 
 
-def get_free_slots(doc_id, days=3):
-    slots = []
-    now = datetime.now()
-
-    for d in range(days):
-        day = now + timedelta(days=d)
-        if day.weekday() >= 5:
-            continue
-
-        s = get_schedule(doc_id)
-
-        for hour in range(s["start"], s["end"]):
-            for minute in [0, 30]:
-                slot = day.replace(hour=hour, minute=minute, second=0, microsecond=0)
-                slot_str = slot.strftime("%Y-%m-%d %H:%M")
-
-                if doctor_available(doc_id, slot_str):
-                    slots.append(slot_str)
-
-    return slots[:5]
-
-
-# ---------------- NEW FIX ----------------
-def validate_slot(slot, doc_id=None):
-    try:
-        dt = datetime.strptime(slot, "%Y-%m-%d %H:%M")
-        now = datetime.now()
-
-        if dt <= now:
-            return None, get_free_slots(doc_id) if doc_id else []
-
-        return slot, None
-    except:
-        return None, []
+def next_slots(slot):
+    base = datetime.strptime(slot, "%Y-%m-%d %H:%M")
+    return [(base + timedelta(minutes=30*i)).strftime("%Y-%m-%d %H:%M") for i in range(1,4)]
 
 
 def book_appointment(name, phone, doc_id, slot):
@@ -154,16 +122,15 @@ def book_appointment(name, phone, doc_id, slot):
         name = name.lower().strip()
         cur.execute("BEGIN IMMEDIATE")
 
-        slot, suggestions = validate_slot(slot, doc_id)
-        if not slot:
-            return False, f"Cannot book past time. Try: {', '.join(suggestions)}"
+        if not is_future(slot):
+            return False, "Pick future time"
 
         if not doctor_available(doc_id, slot):
-            return False, f"Doctor unavailable. Try: {', '.join(get_free_slots(doc_id))}"
+            return False, "Doctor unavailable"
 
         cur.execute("SELECT 1 FROM appointments WHERE doc_id=? AND slot=?", (doc_id, slot))
         if cur.fetchone():
-            return False, f"Slot taken. Try: {', '.join(get_free_slots(doc_id))}"
+            return False, "Slot taken"
 
         cur.execute("INSERT INTO appointments VALUES(NULL,?,?,?,?)",
                     (name, phone, doc_id, slot))
@@ -199,12 +166,12 @@ def reschedule_appointment(name, doc_id, new_slot):
     if not cur.fetchone():
         return False, "Not found"
 
-    new_slot, suggestions = validate_slot(new_slot, doc_id)
-    if not new_slot:
-        return False, f"Cannot reschedule past time. Try: {', '.join(suggestions)}"
-
     if not doctor_available(doc_id, new_slot):
-        return False, f"Try: {', '.join(get_free_slots(doc_id))}"
+        return False, "Doctor unavailable"
+
+    cur.execute("SELECT 1 FROM appointments WHERE doc_id=? AND slot=?", (doc_id, new_slot))
+    if cur.fetchone():
+        return False, "Slot taken"
 
     cur.execute("UPDATE appointments SET slot=? WHERE patient_name=? AND doc_id=?",
                 (new_slot, name.lower().strip(), doc_id))
@@ -219,13 +186,8 @@ def send_whatsapp(phone, name, doctor, slot):
         client = Client(st.secrets["TWILIO_ACCOUNT_SID"],
                         st.secrets["TWILIO_AUTH_TOKEN"])
 
-        msg = f"""🏥 Appointment Confirmed
-{name}
-{doctor}
-{slot}"""
-
         client.messages.create(
-            body=msg,
+            body=f"🏥 Appointment Confirmed\n{name}\n{doctor}\n{slot}",
             from_=st.secrets["TWILIO_WHATSAPP_NUMBER"],
             to=f"whatsapp:{phone}"
         )
@@ -244,22 +206,18 @@ def transcribe_audio(audio_bytes):
         audio = r.record(src)
 
     try:
-        return r.recognize_google(audio)
+        text = r.recognize_google(audio)
     except:
-        return "Could not understand"
+        text = "Could not understand"
 
-    finally:
-        os.unlink(path)
+    os.unlink(path)
+    return text
 
 
 st.sidebar.title(t("Navigation", "التنقل"))
 
-if os.path.exists(DB_PATH):
-    with open(DB_PATH, "rb") as f:
-        st.sidebar.download_button(t("Download DB", "تحميل قاعدة البيانات"), f, file_name="clinic.db")
-
-
 chat_tab, admin_tab = st.tabs([t("Chat", "المحادثة"), t("Administration", "الإدارة")])
+
 
 with chat_tab:
 
@@ -282,56 +240,13 @@ with chat_tab:
     if user_msg:
         st.session_state.history.append({"role": "user", "content": user_msg})
 
-        system_prompt = f"""
-Only use real clinic logic.
-NEVER use past dates.
-Doctors work Sun–Thu, 9AM–6PM.
+    if "history" in st.session_state and user_msg:
+        st.chat_message("user").markdown(user_msg)
 
-If unsure, suggest ONLY:
-{get_free_slots("1")}
+    if "history" in st.session_state and user_msg:
+        st.chat_message("assistant").markdown("...")
 
-Return:
-[BOOKING: name, phone, doc_id, slot]
-[CANCEL: name, doc_id]
-[RESCHEDULE: name, doc_id, slot]
-
-Doctors:
-{DOCTORS}
-"""
-
-        if ai_client:
-            res = ai_client.chat.complete(
-                model="mistral-large-latest",
-                messages=[{"role": "system", "content": system_prompt}]
-                + st.session_state.history
-            )
-            reply = res.choices[0].message.content
-        else:
-            reply = "AI off"
-
-        st.chat_message("assistant").markdown(reply)
-
-        b = re.search(r"\[BOOKING:(.*?)\]", reply)
-        if b:
-            n, p, d, s = [x.strip() for x in b.group(1).split(",")]
-            ok, msg = book_appointment(n, p, d, s)
-            if ok:
-                send_whatsapp(p, n, DOCTORS[d]["en"], s)
-            else:
-                st.warning(msg)
-
-        c = re.search(r"\[CANCEL:(.*?)\]", reply)
-        if c:
-            n, d = [x.strip() for x in c.group(1).split(",")]
-            cancel_appointment(n, d)
-
-        r = re.search(r"\[RESCHEDULE:(.*?)\]", reply)
-        if r:
-            n, d, s = [x.strip() for x in r.group(1).split(",")]
-            reschedule_appointment(n, d, s)
-
-        st.session_state.history.append({"role": "assistant", "content": reply})
-
+    st.session_state.history.append({"role": "assistant", "content": "..."})
 
 with admin_tab:
 
@@ -342,6 +257,12 @@ with admin_tab:
     conn.close()
 
     st.metric(t("Total Appointments", "إجمالي المواعيد"), len(df))
+
+    st.download_button(
+        t("Download Database", "تحميل قاعدة البيانات"),
+        data=open(DB_PATH, "rb").read(),
+        file_name="clinic.db"
+    )
 
     for d in DOCTORS:
         with st.expander(DOCTORS[d]["en"]):
