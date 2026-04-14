@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import os
 import re
 import tempfile
-from openai import OpenAI
+import speech_recognition as sr
 
 st.set_page_config(page_title="Clinic System", layout="wide")
 
@@ -20,9 +20,8 @@ ai_client = None
 if "MISTRAL_API_KEY" in st.secrets:
     ai_client = Mistral(api_key=st.secrets["MISTRAL_API_KEY"])
 
-voice_client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-
+# ================= DATABASE =================
 def db_connection():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
@@ -49,6 +48,7 @@ def setup_database():
 setup_database()
 
 
+# ================= DOCTORS =================
 DOCTORS = {
     "1": {"en": "Dr. Faisal Al-Mahmood (Cardiology)", "ar": "د. فيصل المحمود (القلب)"},
     "2": {"en": "Dr. Mariam Al-Sayed (Pediatrics)", "ar": "د. مريم السيد (أطفال)"},
@@ -64,19 +64,11 @@ DOCTORS = {
 
 
 DOCTOR_SCHEDULE = {
-    "1": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "2": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "3": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "4": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "5": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "6": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "7": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "8": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "9": {"start": 9, "end": 18, "days": [0,1,2,3,4]},
-    "10": {"start": 9, "end": 18, "days": [0,1,2,3,4]}
+    str(i): {"start": 9, "end": 18, "days": [0,1,2,3,4]} for i in range(1,11)
 }
 
 
+# ================= LOGIC =================
 def is_future(slot):
     try:
         return datetime.strptime(slot, "%Y-%m-%d %H:%M") > datetime.now()
@@ -88,12 +80,13 @@ def doctor_available(doc_id, slot):
     try:
         dt = datetime.strptime(slot, "%Y-%m-%d %H:%M")
         s = DOCTOR_SCHEDULE.get(doc_id)
-        if not s:
-            return True
+
         if dt.weekday() not in s["days"]:
             return False
+
         if dt.hour < s["start"] or dt.hour >= s["end"]:
             return False
+
         return True
     except:
         return False
@@ -110,25 +103,34 @@ def next_slots(slot):
 def book_appointment(name, phone, doc_id, slot):
     conn = db_connection()
     cur = conn.cursor()
+
     try:
         name = name.strip().lower()
         cur.execute("BEGIN IMMEDIATE")
+
         if not is_future(slot):
             return False, "Pick a future time."
+
         if not doctor_available(doc_id, slot):
             return False, f"Doctor not available. Try: {', '.join(next_slots(slot))}"
+
         cur.execute("SELECT 1 FROM appointments WHERE doc_id=? AND slot=?", (doc_id, slot))
+
         if cur.fetchone():
             return False, f"Slot taken. Try: {', '.join(next_slots(slot))}"
+
         cur.execute(
             "INSERT INTO appointments (patient_name, phone, doc_id, slot) VALUES (?,?,?,?)",
             (name, phone, doc_id, slot)
         )
+
         conn.commit()
         return True, None
+
     except Exception as e:
         conn.rollback()
         return False, str(e)
+
     finally:
         conn.close()
 
@@ -148,31 +150,39 @@ def send_whatsapp(phone, name, doctor, slot):
             st.secrets["TWILIO_ACCOUNT_SID"],
             st.secrets["TWILIO_AUTH_TOKEN"]
         )
+
         client.messages.create(
             body=f"Appointment Confirmed\n{name}\n{doctor}\n{slot}",
             from_=st.secrets["TWILIO_WHATSAPP_NUMBER"],
             to=f"whatsapp:{phone}"
         )
+
         return True
     except:
         return False
 
 
+# ================= FREE VOICE (NO API) =================
 def transcribe_audio(audio_bytes):
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
+    recognizer = sr.Recognizer()
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
         tmp.write(audio_bytes)
         tmp_path = tmp.name
-    with open(tmp_path, "rb") as f:
-        result = voice_client.audio.transcriptions.create(
-            model="whisper-1",
-            file=f
-        )
+
+    with sr.AudioFile(tmp_path) as source:
+        audio = recognizer.record(source)
+
+    try:
+        text = recognizer.recognize_google(audio)
+    except:
+        text = "Could not understand audio"
+
     os.unlink(tmp_path)
-    return result.text
+    return text
 
 
 # ================= UI =================
-
 st.sidebar.title("Tools")
 
 if os.path.exists(DB_PATH):
@@ -186,11 +196,10 @@ chat_tab, admin_tab = st.tabs(["Chat Assistant", "Admin Dashboard"])
 with chat_tab:
     st.title("Clinic Assistant")
 
-    # ✅ Initialize session state FIRST before any widget
     if "history" not in st.session_state:
         st.session_state.history = []
 
-    # ✅ Audio input
+    # 🎤 Voice button (built-in)
     audio = st.audio_input("Record Voice Message")
 
     if audio is not None:
@@ -199,12 +208,10 @@ with chat_tab:
         st.success("Voice converted to text")
         st.write(transcribed)
 
-    # Display chat history
     for msg in st.session_state.history:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # ✅ Resolve input — typed input takes priority, then pending voice
     user_msg = st.chat_input("How can I help you?")
 
     if not user_msg and st.session_state.get("voice_pending"):
@@ -227,8 +234,7 @@ Doctors: {DOCTORS}
         if ai_client:
             response = ai_client.chat.complete(
                 model="mistral-large-latest",
-                messages=[{"role": "system", "content": system_prompt}]
-                + st.session_state.history
+                messages=[{"role": "system", "content": system_prompt}] + st.session_state.history
             )
             reply = response.choices[0].message.content
         else:
@@ -240,11 +246,15 @@ Doctors: {DOCTORS}
 
         if match:
             parts = [p.strip() for p in match.group(1).split(",")]
+
             if len(parts) == 4:
                 name, phone, doc, slot = parts
+
                 if "2023" in slot:
                     slot = slot.replace("2023", str(now.year))
+
                 ok, err = book_appointment(name, phone, doc, slot)
+
                 if ok:
                     st.success("Booked successfully")
                     send_whatsapp(phone, name, DOCTORS[doc]["en"], slot)
@@ -255,6 +265,7 @@ Doctors: {DOCTORS}
 
         if cancel:
             name, doc = [x.strip() for x in cancel.group(1).split(",")]
+
             if cancel_appointment(name, doc):
                 st.success("Cancelled successfully")
             else:
@@ -272,8 +283,10 @@ with admin_tab:
 
     if len(df):
         st.metric("Total", len(df))
+
         for doc_id, doc in DOCTORS.items():
             sub = df[df["doc_id"] == doc_id]
+
             with st.expander(doc["en"]):
                 st.dataframe(sub)
     else:
