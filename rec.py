@@ -93,6 +93,14 @@ def get_schedule(doc_id):
     return DEFAULT_SCHEDULE
 
 
+def save_schedule(doc_id, start, end):
+    conn = db_connection()
+    cur = conn.cursor()
+    cur.execute("REPLACE INTO doctor_schedule VALUES (?,?,?)", (doc_id, start, end))
+    conn.commit()
+    conn.close()
+
+
 def is_future(slot):
     try:
         return datetime.strptime(slot, "%Y-%m-%d %H:%M") > datetime.now()
@@ -169,7 +177,9 @@ def reschedule_appointment(name, doc_id, new_slot):
     if not doctor_available(doc_id, new_slot):
         return False, "Doctor unavailable"
 
-    cur.execute("SELECT 1 FROM appointments WHERE doc_id=? AND slot=?", (doc_id, new_slot))
+    cur.execute("SELECT 1 FROM appointments WHERE doc_id=? AND slot=?",
+                (doc_id, new_slot))
+
     if cur.fetchone():
         return False, "Slot taken"
 
@@ -220,7 +230,6 @@ chat_tab, admin_tab = st.tabs([t("Chat", "المحادثة"), t("Administration"
 
 
 with chat_tab:
-
     st.title(t("Clinic Assistant", "مساعد العيادة"))
 
     if "history" not in st.session_state:
@@ -240,13 +249,12 @@ with chat_tab:
     if user_msg:
         st.session_state.history.append({"role": "user", "content": user_msg})
 
-    if "history" in st.session_state and user_msg:
         st.chat_message("user").markdown(user_msg)
-
-    if "history" in st.session_state and user_msg:
         st.chat_message("assistant").markdown("...")
 
-    st.session_state.history.append({"role": "assistant", "content": "..."})
+        st.session_state.history.append({"role": "assistant", "content": "..."})
+
+
 
 with admin_tab:
 
@@ -258,12 +266,21 @@ with admin_tab:
 
     st.metric(t("Total Appointments", "إجمالي المواعيد"), len(df))
 
-    st.download_button(
-        t("Download Database", "تحميل قاعدة البيانات"),
-        data=open(DB_PATH, "rb").read(),
-        file_name="clinic.db"
-    )
+    st.markdown("### Doctor Schedule Editor")
 
+    doc = st.selectbox("Doctor", list(DOCTORS.keys()),
+                        format_func=lambda x: DOCTORS[x]["en"])
+
+    s = get_schedule(doc)
+
+    start = st.number_input("Start Hour", 0, 23, s["start"])
+    end = st.number_input("End Hour", 0, 23, s["end"])
+
+    if st.button("Save Schedule"):
+        save_schedule(doc, start, end)
+        st.success("Schedule Updated")
+
+    st.markdown("### All Appointments")
     for d in DOCTORS:
         with st.expander(DOCTORS[d]["en"]):
             st.dataframe(df[df["doc_id"] == d])
