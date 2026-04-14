@@ -19,7 +19,6 @@ if "MISTRAL_API_KEY" in st.secrets:
     ai_client = Mistral(api_key=st.secrets["MISTRAL_API_KEY"])
 
 
-# ---------------- DB ----------------
 def db_connection():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
@@ -40,6 +39,15 @@ def setup_database():
             UNIQUE(doc_id, slot)
         )
     """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS doctor_schedule (
+            doc_id TEXT PRIMARY KEY,
+            start_hour INTEGER,
+            end_hour INTEGER
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -47,7 +55,6 @@ def setup_database():
 setup_database()
 
 
-# ---------------- DOCTORS ----------------
 DOCTORS = {
     "1": {"en": "Dr. Faisal Al-Mahmood (Cardiology)", "ar": "د. فيصل المحمود"},
     "2": {"en": "Dr. Mariam Al-Sayed (Pediatrics)", "ar": "د. مريم السيد"},
@@ -61,41 +68,49 @@ DOCTORS = {
     "10": {"en": "Dr. Ahmed Al-Aali", "ar": "د. أحمد العالي"}
 }
 
-DOCTOR_SCHEDULE = {str(i): {"start":9,"end":18,"days":[0,1,2,3,4]} for i in range(1,11)}
+DEFAULT_SCHEDULE = {"start": 9, "end": 18}
 
 
-# ---------------- LOGIC ----------------
+def get_schedule(doc_id):
+    conn = db_connection()
+    cur = conn.cursor()
+
+    cur.execute("SELECT start_hour, end_hour FROM doctor_schedule WHERE doc_id=?", (doc_id,))
+    row = cur.fetchone()
+
+    if row:
+        conn.close()
+        return {"start": row[0], "end": row[1]}
+
+    cur.execute("INSERT OR IGNORE INTO doctor_schedule VALUES (?,?,?)",
+                (doc_id, DEFAULT_SCHEDULE["start"], DEFAULT_SCHEDULE["end"]))
+    conn.commit()
+    conn.close()
+
+    return DEFAULT_SCHEDULE
+
+
 def is_future(slot):
     try:
-        return datetime.strptime(slot,"%Y-%m-%d %H:%M") > datetime.now()
+        return datetime.strptime(slot, "%Y-%m-%d %H:%M") > datetime.now()
     except:
         return False
 
 
 def doctor_available(doc_id, slot):
     try:
-        dt = datetime.strptime(slot,"%Y-%m-%d %H:%M")
-        s = DOCTOR_SCHEDULE[doc_id]
-
-        if dt.weekday() not in s["days"]:
-            return False
-        if dt.hour < s["start"] or dt.hour >= s["end"]:
-            return False
-
-        return True
+        dt = datetime.strptime(slot, "%Y-%m-%d %H:%M")
+        s = get_schedule(doc_id)
+        return dt.weekday() < 5 and s["start"] <= dt.hour < s["end"]
     except:
         return False
 
 
 def next_slots(slot):
-    try:
-        base = datetime.strptime(slot,"%Y-%m-%d %H:%M")
-        return [(base + timedelta(minutes=30*i)).strftime("%Y-%m-%d %H:%M") for i in range(1,4)]
-    except:
-        return []
+    base = datetime.strptime(slot, "%Y-%m-%d %H:%M")
+    return [(base + timedelta(minutes=30*i)).strftime("%Y-%m-%d %H:%M") for i in range(1,4)]
 
 
-# ---------------- CORE ----------------
 def book_appointment(name, phone, doc_id, slot):
     conn = db_connection()
     cur = conn.cursor()
@@ -105,23 +120,24 @@ def book_appointment(name, phone, doc_id, slot):
         cur.execute("BEGIN IMMEDIATE")
 
         if not is_future(slot):
-            return False,"Pick future time"
+            return False, "Pick future time"
 
-        if not doctor_available(doc_id,slot):
-            return False,f"Doctor busy. Try {next_slots(slot)}"
+        if not doctor_available(doc_id, slot):
+            return False, "Doctor unavailable"
 
-        cur.execute("SELECT 1 FROM appointments WHERE doc_id=? AND slot=?",(doc_id,slot))
+        cur.execute("SELECT 1 FROM appointments WHERE doc_id=? AND slot=?", (doc_id, slot))
         if cur.fetchone():
-            return False,"Slot already taken"
+            return False, "Slot taken"
 
-        cur.execute("INSERT INTO appointments VALUES(NULL,?,?,?,?)",(name,phone,doc_id,slot))
+        cur.execute("INSERT INTO appointments VALUES(NULL,?,?,?,?)",
+                    (name, phone, doc_id, slot))
+
         conn.commit()
-
-        return True,None
+        return True, None
 
     except Exception as e:
         conn.rollback()
-        return False,str(e)
+        return False, str(e)
 
     finally:
         conn.close()
@@ -130,13 +146,10 @@ def book_appointment(name, phone, doc_id, slot):
 def cancel_appointment(name, doc_id):
     conn = db_connection()
     cur = conn.cursor()
-
     cur.execute("DELETE FROM appointments WHERE patient_name=? AND doc_id=?",
-                (name.lower().strip(),doc_id))
-
+                (name.lower().strip(), doc_id))
     conn.commit()
     conn.close()
-
     return True
 
 
@@ -144,45 +157,41 @@ def reschedule_appointment(name, doc_id, new_slot):
     conn = db_connection()
     cur = conn.cursor()
 
-    try:
-        name = name.lower().strip()
+    cur.execute("SELECT 1 FROM appointments WHERE patient_name=? AND doc_id=?",
+                (name.lower().strip(), doc_id))
 
-        # check exists
-        cur.execute("SELECT * FROM appointments WHERE patient_name=? AND doc_id=?",
-                    (name,doc_id))
-        if not cur.fetchone():
-            return False,"No booking found"
+    if not cur.fetchone():
+        return False, "Not found"
 
-        # check new slot
-        if not doctor_available(doc_id,new_slot):
-            return False,"Doctor unavailable"
+    if not doctor_available(doc_id, new_slot):
+        return False, "Doctor unavailable"
 
-        cur.execute("SELECT 1 FROM appointments WHERE doc_id=? AND slot=?",
-                    (doc_id,new_slot))
-        if cur.fetchone():
-            return False,"New slot taken"
+    cur.execute("SELECT 1 FROM appointments WHERE doc_id=? AND slot=?",
+                (doc_id, new_slot))
 
-        cur.execute("UPDATE appointments SET slot=? WHERE patient_name=? AND doc_id=?",
-                    (new_slot,name,doc_id))
+    if cur.fetchone():
+        return False, "Slot taken"
 
-        conn.commit()
-        return True,None
+    cur.execute("UPDATE appointments SET slot=? WHERE patient_name=? AND doc_id=?",
+                (new_slot, name.lower().strip(), doc_id))
 
-    except Exception as e:
-        conn.rollback()
-        return False,str(e)
-
-    finally:
-        conn.close()
+    conn.commit()
+    conn.close()
+    return True, None
 
 
-def send_whatsapp(phone,name,doctor,slot):
+def send_whatsapp(phone, name, doctor, slot):
     try:
         client = Client(st.secrets["TWILIO_ACCOUNT_SID"],
                         st.secrets["TWILIO_AUTH_TOKEN"])
 
+        msg = f"""🏥 Appointment Confirmed
+{name}
+{doctor}
+{slot}"""
+
         client.messages.create(
-            body=f"Appointment Confirmed\n{name}\n{doctor}\n{slot}",
+            body=msg,
             from_=st.secrets["TWILIO_WHATSAPP_NUMBER"],
             to=f"whatsapp:{phone}"
         )
@@ -190,11 +199,10 @@ def send_whatsapp(phone,name,doctor,slot):
         pass
 
 
-# ---------------- VOICE ----------------
 def transcribe_audio(audio_bytes):
     r = sr.Recognizer()
 
-    with tempfile.NamedTemporaryFile(delete=False,suffix=".wav") as tmp:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
         tmp.write(audio_bytes)
         path = tmp.name
 
@@ -202,7 +210,7 @@ def transcribe_audio(audio_bytes):
         audio = r.record(src)
 
     try:
-        text = r.recognize_google(audio, language="ar-SA" if language=="العربية" else "en-US")
+        text = r.recognize_google(audio)
     except:
         text = "Could not understand"
 
@@ -210,14 +218,9 @@ def transcribe_audio(audio_bytes):
     return text
 
 
-# ---------------- UI ----------------
-st.sidebar.title("Tools")
+st.sidebar.title("Navigation")
 
-if os.path.exists(DB_PATH):
-    with open(DB_PATH,"rb") as f:
-        st.sidebar.download_button("Download DB",f,"clinic.db")
-
-chat_tab, admin_tab = st.tabs(["Chat","Admin"])
+chat_tab, admin_tab = st.tabs(["Chat Assistant", "Administration Panel"])
 
 
 with chat_tab:
@@ -232,11 +235,6 @@ with chat_tab:
     if audio:
         txt = transcribe_audio(audio.getvalue())
         st.session_state["voice_pending"] = txt
-        st.write("You said:",txt)
-
-    for msg in st.session_state.history:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
 
     user_msg = st.chat_input("Type...")
 
@@ -244,17 +242,12 @@ with chat_tab:
         user_msg = st.session_state.pop("voice_pending")
 
     if user_msg:
-        st.session_state.history.append({"role":"user","content":user_msg})
-        st.chat_message("user").markdown(user_msg)
-
-        now = datetime.now()
+        st.session_state.history.append({"role": "user", "content": user_msg})
 
         system_prompt = f"""
-You are receptionist.
-
-BOOK: [BOOKING: Name, Phone, DocID, YYYY-MM-DD HH:MM]
-CANCEL: [CANCEL: Name, DocID]
-RESCHEDULE: [RESCHEDULE: Name, DocID, YYYY-MM-DD HH:MM]
+BOOK [BOOKING: name, phone, doc_id, slot]
+CANCEL [CANCEL: name, doc_id]
+RESCHEDULE [RESCHEDULE: name, doc_id, slot]
 
 Doctors: {DOCTORS}
 """
@@ -262,57 +255,62 @@ Doctors: {DOCTORS}
         if ai_client:
             res = ai_client.chat.complete(
                 model="mistral-large-latest",
-                messages=[{"role":"system","content":system_prompt}] + st.session_state.history
+                messages=[{"role": "system", "content": system_prompt}]
+                + st.session_state.history
             )
             reply = res.choices[0].message.content
         else:
-            reply = "AI not working"
+            reply = "AI off"
 
         st.chat_message("assistant").markdown(reply)
 
-        # BOOK
-        m = re.search(r"\[BOOKING:(.*?)\]",reply)
-        if m:
-            name,phone,doc,slot = [x.strip() for x in m.group(1).split(",")]
-            ok,err = book_appointment(name,phone,doc,slot)
+        b = re.search(r"\[BOOKING:(.*?)\]", reply)
+        if b:
+            n,p,d,s = [x.strip() for x in b.group(1).split(",")]
+            ok,_ = book_appointment(n,p,d,s)
             if ok:
-                st.success("Booked")
-                send_whatsapp(phone,name,DOCTORS[doc]["en"],slot)
-            else:
-                st.warning(err)
+                send_whatsapp(p,n,DOCTORS[d]["en"],s)
 
-        # CANCEL
-        c = re.search(r"\[CANCEL:(.*?)\]",reply)
+        c = re.search(r"\[CANCEL:(.*?)\]", reply)
         if c:
-            name,doc = [x.strip() for x in c.group(1).split(",")]
-            cancel_appointment(name,doc)
-            st.success("Cancelled")
+            n,d = [x.strip() for x in c.group(1).split(",")]
+            cancel_appointment(n,d)
 
-        # RESCHEDULE
-        r = re.search(r"\[RESCHEDULE:(.*?)\]",reply)
+        r = re.search(r"\[RESCHEDULE:(.*?)\]", reply)
         if r:
-            name,doc,new_slot = [x.strip() for x in r.group(1).split(",")]
-            ok,err = reschedule_appointment(name,doc,new_slot)
-            if ok:
-                st.success("Rescheduled")
-            else:
-                st.warning(err)
+            n,d,s = [x.strip() for x in r.group(1).split(",")]
+            reschedule_appointment(n,d,s)
 
-        st.session_state.history.append({"role":"assistant","content":reply})
+        st.session_state.history.append({"role": "assistant", "content": reply})
 
 
 with admin_tab:
-    st.subheader("Appointments")
+
+    st.subheader("Administration Panel")
 
     conn = db_connection()
-    df = pd.read_sql_query("SELECT * FROM appointments",conn)
+    df = pd.read_sql_query("SELECT * FROM appointments", conn)
     conn.close()
 
-    if len(df):
-        st.metric("Total",len(df))
+    st.metric("Total Appointments", len(df))
 
-        for d_id,doc in DOCTORS.items():
-            with st.expander(doc["en"]):
-                st.dataframe(df[df["doc_id"]==d_id])
-    else:
-        st.info("No bookings yet")
+    st.markdown("Doctor Schedule")
+
+    doc = st.selectbox("Doctor", list(DOCTORS.keys()), format_func=lambda x: DOCTORS[x]["en"])
+
+    s = get_schedule(doc)
+
+    start = st.number_input("Start", 0, 23, s["start"])
+    end = st.number_input("End", 0, 23, s["end"])
+
+    if st.button("Save"):
+        conn = db_connection()
+        cur = conn.cursor()
+        cur.execute("REPLACE INTO doctor_schedule VALUES (?,?,?)", (doc, start, end))
+        conn.commit()
+        conn.close()
+        st.success("Updated")
+
+    for d in DOCTORS:
+        with st.expander(DOCTORS[d]["en"]):
+            st.dataframe(df[df["doc_id"] == d])
