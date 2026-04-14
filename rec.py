@@ -132,6 +132,20 @@ def get_free_slots(doc_id, days=3):
     return slots[:5]
 
 
+# ---------------- NEW FIX ----------------
+def validate_slot(slot, doc_id=None):
+    try:
+        dt = datetime.strptime(slot, "%Y-%m-%d %H:%M")
+        now = datetime.now()
+
+        if dt <= now:
+            return None, get_free_slots(doc_id) if doc_id else []
+
+        return slot, None
+    except:
+        return None, []
+
+
 def book_appointment(name, phone, doc_id, slot):
     conn = db_connection()
     cur = conn.cursor()
@@ -140,8 +154,9 @@ def book_appointment(name, phone, doc_id, slot):
         name = name.lower().strip()
         cur.execute("BEGIN IMMEDIATE")
 
-        if not is_future(slot):
-            return False, "Pick future time"
+        slot, suggestions = validate_slot(slot, doc_id)
+        if not slot:
+            return False, f"Cannot book past time. Try: {', '.join(suggestions)}"
 
         if not doctor_available(doc_id, slot):
             return False, f"Doctor unavailable. Try: {', '.join(get_free_slots(doc_id))}"
@@ -183,6 +198,10 @@ def reschedule_appointment(name, doc_id, new_slot):
 
     if not cur.fetchone():
         return False, "Not found"
+
+    new_slot, suggestions = validate_slot(new_slot, doc_id)
+    if not new_slot:
+        return False, f"Cannot reschedule past time. Try: {', '.join(suggestions)}"
 
     if not doctor_available(doc_id, new_slot):
         return False, f"Try: {', '.join(get_free_slots(doc_id))}"
@@ -265,9 +284,10 @@ with chat_tab:
 
         system_prompt = f"""
 Only use real clinic logic.
+NEVER use past dates.
 Doctors work Sun–Thu, 9AM–6PM.
 
-If unsure, suggest FREE SLOTS ONLY like:
+If unsure, suggest ONLY:
 {get_free_slots("1")}
 
 Return:
