@@ -6,6 +6,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 import os, re, tempfile
 import speech_recognition as sr
+import matplotlib.pyplot as plt
 
 st.set_page_config(page_title="Clinic System", layout="wide")
 
@@ -23,6 +24,7 @@ if "MISTRAL_API_KEY" in st.secrets:
     ai_client = Mistral(api_key=st.secrets["MISTRAL_API_KEY"])
 
 
+# ================= DATABASE =================
 def db_connection():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
@@ -40,6 +42,7 @@ def setup_database():
             phone TEXT,
             doc_id TEXT,
             slot TEXT,
+            status TEXT DEFAULT 'pending',
             UNIQUE(doc_id, slot)
         )
     """)
@@ -59,6 +62,7 @@ def setup_database():
 setup_database()
 
 
+# ================= DOCTORS =================
 DOCTORS = {
     "1": {"en": "Dr. Faisal Al-Mahmood (Cardiology)", "ar": "د. فيصل المحمود"},
     "2": {"en": "Dr. Mariam Al-Sayed (Pediatrics)", "ar": "د. مريم السيد"},
@@ -75,6 +79,18 @@ DOCTORS = {
 DEFAULT_SCHEDULE = {"start": 9, "end": 18}
 
 
+# ================= VALIDATION =================
+def valid_input(name, phone):
+    if not name or len(name.strip()) < 3:
+        return False, "Invalid name"
+
+    if not re.match(r"^\+?973?\d{8}$", phone):
+        return False, "Invalid phone number"
+
+    return True, None
+
+
+# ================= SCHEDULE =================
 def get_schedule(doc_id):
     conn = db_connection()
     cur = conn.cursor()
@@ -94,13 +110,6 @@ def get_schedule(doc_id):
     return DEFAULT_SCHEDULE
 
 
-def is_future(slot):
-    try:
-        return datetime.strptime(slot, "%Y-%m-%d %H:%M") > datetime.now()
-    except:
-        return False
-
-
 def doctor_available(doc_id, slot):
     try:
         dt = datetime.strptime(slot, "%Y-%m-%d %H:%M")
@@ -110,18 +119,22 @@ def doctor_available(doc_id, slot):
         return False
 
 
-def next_slots(slot):
-    base = datetime.strptime(slot, "%Y-%m-%d %H:%M")
-    return [(base + timedelta(minutes=30*i)).strftime("%Y-%m-%d %H:%M") for i in range(1,4)]
+def is_future(slot):
+    try:
+        return datetime.strptime(slot, "%Y-%m-%d %H:%M") > datetime.now()
+    except:
+        return False
 
 
+# ================= BOOKING =================
 def book_appointment(name, phone, doc_id, slot):
     conn = db_connection()
     cur = conn.cursor()
 
     try:
-        name = name.lower().strip()
-        cur.execute("BEGIN IMMEDIATE")
+        valid, err = valid_input(name, phone)
+        if not valid:
+            return False, err
 
         if not is_future(slot):
             return False, "Pick future time"
@@ -133,8 +146,8 @@ def book_appointment(name, phone, doc_id, slot):
         if cur.fetchone():
             return False, "Slot taken"
 
-        cur.execute("INSERT INTO appointments VALUES(NULL,?,?,?,?)",
-                    (name, phone, doc_id, slot))
+        cur.execute("INSERT INTO appointments VALUES(NULL,?,?,?,?,?)",
+                    (name.strip(), phone, doc_id, slot, "pending"))
 
         conn.commit()
         return True, None
@@ -147,43 +160,7 @@ def book_appointment(name, phone, doc_id, slot):
         conn.close()
 
 
-def cancel_appointment(name, doc_id):
-    conn = db_connection()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM appointments WHERE patient_name=? AND doc_id=?",
-                (name.lower().strip(), doc_id))
-    conn.commit()
-    conn.close()
-    return True
-
-
-def reschedule_appointment(name, doc_id, new_slot):
-    conn = db_connection()
-    cur = conn.cursor()
-
-    cur.execute("SELECT 1 FROM appointments WHERE patient_name=? AND doc_id=?",
-                (name.lower().strip(), doc_id))
-
-    if not cur.fetchone():
-        return False, "Not found"
-
-    if not doctor_available(doc_id, new_slot):
-        return False, "Doctor unavailable"
-
-    cur.execute("SELECT 1 FROM appointments WHERE doc_id=? AND slot=?",
-                (doc_id, new_slot))
-
-    if cur.fetchone():
-        return False, "Slot taken"
-
-    cur.execute("UPDATE appointments SET slot=? WHERE patient_name=? AND doc_id=?",
-                (new_slot, name.lower().strip(), doc_id))
-
-    conn.commit()
-    conn.close()
-    return True, None
-
-
+# ================= WHATSAPP =================
 def send_whatsapp(phone, name, doctor, slot):
     try:
         client = Client(st.secrets["TWILIO_ACCOUNT_SID"],
@@ -198,67 +175,31 @@ def send_whatsapp(phone, name, doctor, slot):
         pass
 
 
-def transcribe_audio(audio_bytes):
-    r = sr.Recognizer()
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-        tmp.write(audio_bytes)
-        path = tmp.name
-
-    with sr.AudioFile(path) as src:
-        audio = r.record(src)
-
-    try:
-        text = r.recognize_google(audio)
-    except:
-        text = "Could not understand"
-
-    os.unlink(path)
-    return text
+# ================= UI =================
+chat_tab, admin_tab = st.tabs(["Chat", "Administration"])
 
 
-st.sidebar.title(t("Navigation", "التنقل"))
-
-if os.path.exists(DB_PATH):
-    with open(DB_PATH, "rb") as f:
-        st.sidebar.download_button(
-            t("Download Database", "تحميل قاعدة البيانات"),
-            f,
-            file_name="clinic.db"
-        )
-
-
-chat_tab, admin_tab = st.tabs([t("Chat", "المحادثة"), t("Administration", "الإدارة")])
-
-
+# ================= CHAT =================
 with chat_tab:
-
-    st.title(t("Clinic Assistant", "مساعد العيادة"))
+    st.title("Clinic Assistant")
 
     if "history" not in st.session_state:
         st.session_state.history = []
 
-    audio = st.audio_input(t("Speak", "تحدث"))
-
-    if audio:
-        txt = transcribe_audio(audio.getvalue())
-        st.session_state["voice_pending"] = txt
-
-    user_msg = st.chat_input(t("Type message", "اكتب رسالة"))
-
-    if not user_msg and st.session_state.get("voice_pending"):
-        user_msg = st.session_state.pop("voice_pending")
+    user_msg = st.chat_input("Type message")
 
     if user_msg:
         st.session_state.history.append({"role": "user", "content": user_msg})
 
-        system_prompt = f"""
-Doctors work Sun–Thu 9AM–6PM.
-Never suggest past times.
+        system_prompt = """
+        You are a clinic assistant.
 
-Doctors:
-{DOCTORS}
-"""
+        RULES:
+        - NEVER book without name AND phone
+        - If missing info → ASK USER
+        - Booking format:
+        [BOOKING: name, phone, doctor_id, YYYY-MM-DD HH:MM]
+        """
 
         if ai_client:
             res = ai_client.chat.complete(
@@ -275,56 +216,119 @@ Doctors:
         b = re.search(r"\[BOOKING:(.*?)\]", reply)
         if b:
             n,p,d,s = [x.strip() for x in b.group(1).split(",")]
-            ok,_ = book_appointment(n,p,d,s)
+            ok,err = book_appointment(n,p,d,s)
             if ok:
-                send_whatsapp(p,n,DOCTORS[d]["en"],s)
-
-        c = re.search(r"\[CANCEL:(.*?)\]", reply)
-        if c:
-            n,d = [x.strip() for x in c.group(1).split(",")]
-            cancel_appointment(n,d)
-
-        r = re.search(r"\[RESCHEDULE:(.*?)\]", reply)
-        if r:
-            n,d,s = [x.strip() for x in r.group(1).split(",")]
-            reschedule_appointment(n,d,s)
+                st.success("Booking pending approval")
+            else:
+                st.warning(err)
 
         st.session_state.history.append({"role": "assistant", "content": reply})
 
 
+# ================= ADMIN =================
 with admin_tab:
-
-    st.subheader(t("Administration Panel", "لوحة الإدارة"))
+    st.subheader("Admin Panel")
 
     conn = db_connection()
     df = pd.read_sql_query("SELECT * FROM appointments", conn)
     conn.close()
 
-    st.metric(t("Total Appointments", "إجمالي المواعيد"), len(df))
+    # Clean bad data
+    df = df[df["patient_name"].notna()]
+    df = df[df["phone"].notna()]
 
-    st.markdown("### " + t("Doctor Schedule Editor", "تعديل جدول الأطباء"))
+    st.metric("Total Appointments", len(df))
 
-    doc = st.selectbox(
-        t("Select Doctor", "اختر الطبيب"),
-        list(DOCTORS.keys()),
-        format_func=lambda x: DOCTORS[x]["en"]
-    )
+    # ===== Approval System =====
+    st.markdown("### Pending Approvals")
+
+    pending = df[df["status"] == "pending"]
+
+    for i, row in pending.iterrows():
+        col1, col2, col3 = st.columns([3,1,1])
+
+        with col1:
+            st.write(f"{row['patient_name']} | {row['slot']}")
+
+        with col2:
+            if st.button(f"Approve {row['id']}"):
+                conn = db_connection()
+                cur = conn.cursor()
+
+                # enforce schedule again
+                if not doctor_available(row["doc_id"], row["slot"]):
+                    st.error("Doctor not available anymore")
+                else:
+                    cur.execute("UPDATE appointments SET status='approved' WHERE id=?", (row['id'],))
+                    conn.commit()
+
+                    send_whatsapp(
+                        row["phone"],
+                        row["patient_name"],
+                        DOCTORS[row["doc_id"]]["en"],
+                        row["slot"]
+                    )
+
+                conn.close()
+                st.rerun()
+
+        with col3:
+            if st.button(f"Reject {row['id']}"):
+                conn = db_connection()
+                cur = conn.cursor()
+                cur.execute("DELETE FROM appointments WHERE id=?", (row['id'],))
+                conn.commit()
+                conn.close()
+                st.rerun()
+
+    # ===== Schedule Editor =====
+    st.markdown("### Doctor Schedule")
+
+    doc = st.selectbox("Doctor", list(DOCTORS.keys()),
+                       format_func=lambda x: DOCTORS[x]["en"])
 
     s = get_schedule(doc)
 
-    start = st.number_input(t("Start Hour", "بداية الدوام"), 0, 23, s["start"])
-    end = st.number_input(t("End Hour", "نهاية الدوام"), 0, 23, s["end"])
+    start = st.number_input("Start Hour", 0, 23, s["start"])
+    end = st.number_input("End Hour", 0, 23, s["end"])
 
-    if st.button(t("Save Schedule", "حفظ الجدول")):
+    if st.button("Save Schedule"):
         conn = db_connection()
         cur = conn.cursor()
         cur.execute("REPLACE INTO doctor_schedule VALUES (?,?,?)", (doc, start, end))
         conn.commit()
         conn.close()
-        st.success(t("Updated", "تم التحديث"))
+        st.success("Updated")
 
-    st.markdown("### " + t("All Appointments", "كل المواعيد"))
+    # ===== Schedule Viewer =====
+    st.markdown("### Current Schedule")
+
+    for d in DOCTORS:
+        s = get_schedule(d)
+        st.write(f"{DOCTORS[d]['en']} → {s['start']}:00 - {s['end']}:00")
+
+    # ===== Display Appointments =====
+    st.markdown("### Appointments")
 
     for d in DOCTORS:
         with st.expander(DOCTORS[d]["en"]):
-            st.dataframe(df[df["doc_id"] == d])
+            approved = df[(df["doc_id"] == d) & (df["status"] == "approved")]
+            pending = df[(df["doc_id"] == d) & (df["status"] == "pending")]
+
+            st.write("Approved")
+            st.dataframe(approved)
+
+            st.write("Pending")
+            st.dataframe(pending)
+
+    # ===== Analytics =====
+    st.markdown("### Analytics")
+
+    if not df.empty:
+        st.bar_chart(df["doc_id"].value_counts())
+
+        df["date"] = pd.to_datetime(df["slot"])
+        daily = df.groupby(df["date"].dt.date).size()
+        st.line_chart(daily)
+
+        st.write(df["status"].value_counts())
