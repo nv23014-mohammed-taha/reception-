@@ -68,7 +68,7 @@ section[data-testid="stSidebar"] { display: none; }
 """, unsafe_allow_html=True)
 
 # ─── Constants ────────────────────────────────────────────────────────────────
-BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR    = os.getcwd()
 DB_PATH     = os.path.join(BASE_DIR, "hospital_management.db")
 CLINIC_NAME = "AlShifa Clinic"
 CLINIC_ADDR = "Building 115, Block 945, Street 4504, Awali, Al-Janubiyah, Bahrain"
@@ -138,18 +138,27 @@ def doctor_available(doc_id, slot):
     except: return False
 
 def book_appointment(name, phone, doc_id, slot):
+    name = name.lower().strip()
+    if not is_future(slot):
+        return False, "Please pick a future time"
+    if not doctor_available(doc_id, slot):
+        return False, "Doctor unavailable at that time"
     conn = db_connection(); cur = conn.cursor()
     try:
-        name = name.lower().strip()
-        cur.execute("BEGIN IMMEDIATE")
-        if not is_future(slot):              return False, "Please pick a future time"
-        if not doctor_available(doc_id, slot): return False, "Doctor unavailable at that time"
         cur.execute("SELECT 1 FROM appointments WHERE doc_id=? AND slot=?", (doc_id, slot))
-        if cur.fetchone():                   return False, "That slot is already taken"
-        cur.execute("INSERT INTO appointments VALUES(NULL,?,?,?,?,'confirmed')", (name, phone, doc_id, slot))
-        conn.commit(); return True, None
-    except Exception as e: conn.rollback(); return False, str(e)
-    finally: conn.close()
+        if cur.fetchone():
+            return False, "That slot is already taken"
+        cur.execute(
+            "INSERT INTO appointments (patient_name, phone, doc_id, slot, status) VALUES (?,?,?,?,'confirmed')",
+            (name, phone, doc_id, slot)
+        )
+        conn.commit()
+        return True, None
+    except Exception as e:
+        conn.rollback()
+        return False, str(e)
+    finally:
+        conn.close()
 
 def cancel_appointment(name, doc_id):
     conn = db_connection(); cur = conn.cursor()
@@ -308,8 +317,12 @@ if st.session_state.role == "admin":
     st.markdown("<div class='admin-wrap'>", unsafe_allow_html=True)
     st.markdown("<div class='section-title'>Administration Panel</div>", unsafe_allow_html=True)
 
+    # Always read fresh from DB — never cache this
+    if st.button("🔄 Refresh"):
+        st.rerun()
+
     conn = db_connection()
-    df   = pd.read_sql_query("SELECT * FROM appointments", conn)
+    df   = pd.read_sql_query("SELECT * FROM appointments ORDER BY slot", conn)
     conn.close()
 
     today    = datetime.now().strftime("%Y-%m-%d")
@@ -319,6 +332,23 @@ if st.session_state.role == "admin":
     with c1: st.metric("Total Appointments", len(df))
     with c2: st.metric("Today", len(today_df))
     with c3: st.metric("Doctors", len(DOCTORS))
+
+    # Raw database view — always shown so you can verify data
+    st.markdown("<div class='section-title'>All Appointments (Raw)</div>", unsafe_allow_html=True)
+    if df.empty:
+        st.info("No appointments in database. DB path: " + DB_PATH)
+    else:
+        st.dataframe(df, use_container_width=True)
+
+    st.markdown("<div class='section-title'>By Doctor</div>", unsafe_allow_html=True)
+    if not df.empty:
+        search   = st.text_input("Filter by patient name", placeholder="Search…")
+        filtered = df[df["patient_name"].str.contains(search.lower(), na=False)] if search else df
+        for d in DOCTORS:
+            doc_df = filtered[filtered["doc_id"] == d]
+            with st.expander(f"{DOCTORS[d]['en']} · {DOCTORS[d]['specialty']} ({len(doc_df)})"):
+                if doc_df.empty: st.write("No appointments.")
+                else: st.dataframe(doc_df[["patient_name","phone","slot","status"]], use_container_width=True)
 
     st.markdown("<div class='section-title'>Doctor Schedules</div>", unsafe_allow_html=True)
     col_a, col_b = st.columns([1, 2])
@@ -333,18 +363,6 @@ if st.session_state.role == "admin":
                 conn = db_connection(); cur = conn.cursor()
                 cur.execute("REPLACE INTO doctor_schedule VALUES (?,?,?)", (doc, start, end))
                 conn.commit(); conn.close(); st.success("Saved.")
-
-    st.markdown("<div class='section-title'>All Appointments</div>", unsafe_allow_html=True)
-    if df.empty:
-        st.info("No appointments on record.")
-    else:
-        search   = st.text_input("Filter by patient name", placeholder="Search…")
-        filtered = df[df["patient_name"].str.contains(search.lower(), na=False)] if search else df
-        for d in DOCTORS:
-            doc_df = filtered[filtered["doc_id"] == d]
-            with st.expander(f"{DOCTORS[d]['en']} · {DOCTORS[d]['specialty']} ({len(doc_df)})"):
-                if doc_df.empty: st.write("No appointments.")
-                else: st.dataframe(doc_df[["patient_name","phone","slot","status"]], use_container_width=True)
 
     if os.path.exists(DB_PATH):
         with open(DB_PATH, "rb") as f:
