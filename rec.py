@@ -6,6 +6,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 import os, re, tempfile
 import speech_recognition as sr
+from whatsapp_bot import send_whatsapp
 
 st.set_page_config(page_title="Clinic System", layout="wide")
 
