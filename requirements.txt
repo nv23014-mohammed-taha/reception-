@@ -1,9 +1,5 @@
-streamlit
 mistralai
 twilio
-pandas
-openai
+streamlit
 SpeechRecognition
-openai-whisper
-matplotlib
-mistralai
+pandas
