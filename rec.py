@@ -335,9 +335,17 @@ if st.session_state.session["user"] == "admin":
     m2.metric("Today", len(all_appts[all_appts['slot'].str.startswith(datetime.now().strftime("%Y-%m-%d"))]))
     m3.metric("Staff", len(DOCTORS))
     
-    st.markdown('<div class="heading">Current Appointments</div>', unsafe_allow_html=True)
+    st.markdown('<div class="heading">Appointment Records</div>', unsafe_allow_html=True)
     if all_appts.empty: st.info("No records found")
-    else: st.dataframe(all_appts, use_container_width=True)
+    else:
+        display_df = all_appts.copy()
+        display_df['Doctor'] = display_df['doc_id'].apply(lambda x: DOCTORS.get(x, {}).get('name', 'Unknown'))
+        display_df['Specialty'] = display_df['doc_id'].apply(lambda x: DOCTORS.get(x, {}).get('field', 'Unknown'))
+        st.dataframe(display_df[['patient_name', 'phone', 'Doctor', 'Specialty', 'slot', 'status']], use_container_width=True)
+        
+        if os.path.exists(DB_PATH):
+            with open(DB_PATH, "rb") as f:
+                st.download_button("Download Records Database", f, "clinic_records.db", "application/octet-stream")
     
     st.markdown('<div class="heading">Staff Management</div>', unsafe_allow_html=True)
     ca, cb = st.columns([1, 2])
@@ -393,7 +401,7 @@ if voice_audio:
         with sr.AudioFile(path) as src:
             audio = r.record(src)
             text = r.recognize_google(audio)
-            if text and "last_voice" not in st.session_state or st.session_state.last_voice != text:
+            if text and ("last_voice" not in st.session_state or st.session_state.last_voice != text):
                 st.session_state.voice_data = text
                 st.session_state.last_voice = text
     except: pass
