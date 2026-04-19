@@ -169,14 +169,50 @@ def reschedule_appointment(name, doc_id, new_slot):
 
 # ─── WhatsApp ─────────────────────────────────────────────────────────────────
 def send_wa(phone, body):
+    # Check secrets exist first and give clear guidance
+    missing = [k for k in ["TWILIO_ACCOUNT_SID","TWILIO_AUTH_TOKEN","TWILIO_WHATSAPP_NUMBER"]
+               if k not in st.secrets]
+    if missing:
+        st.error(
+            f"⚠️ WhatsApp not sent — missing Streamlit secrets: **{', '.join(missing)}**\n\n"
+            "Go to your app on Streamlit Cloud → ⋮ menu → **Settings → Secrets** and add:\n"
+            "```\n"
+            "TWILIO_ACCOUNT_SID = \"ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"\n"
+            "TWILIO_AUTH_TOKEN  = \"your_auth_token\"\n"
+            "TWILIO_WHATSAPP_NUMBER = \"whatsapp:+14155238886\"\n"
+            "```"
+        )
+        return False
+
+    # Normalise phone — ensure it starts with +
+    phone = phone.strip()
+    if not phone.startswith("+"):
+        phone = "+" + phone
+
     try:
         c = Client(st.secrets["TWILIO_ACCOUNT_SID"], st.secrets["TWILIO_AUTH_TOKEN"])
-        c.messages.create(body=body, from_=st.secrets["TWILIO_WHATSAPP_NUMBER"], to=f"whatsapp:{phone}")
+        msg = c.messages.create(
+            body=body,
+            from_=st.secrets["TWILIO_WHATSAPP_NUMBER"],
+            to=f"whatsapp:{phone}"
+        )
+        return True
     except Exception as e:
-        st.warning(f"WhatsApp failed: {e}")
+        err = str(e)
+        # Give helpful hints for common Twilio errors
+        if "21408" in err or "not a valid" in err.lower():
+            hint = "The recipient number hasn't joined the Twilio WhatsApp sandbox. They need to send the join code first."
+        elif "20003" in err or "authenticate" in err.lower():
+            hint = "Your TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN is incorrect."
+        elif "21606" in err:
+            hint = "TWILIO_WHATSAPP_NUMBER is not enabled for WhatsApp — check your Twilio console."
+        else:
+            hint = err
+        st.warning(f"📵 WhatsApp not sent: {hint}")
+        return False
 
 def send_confirmation(phone, name, doctor, slot):
-    send_wa(phone, f"✅ *{CLINIC_NAME} — Appointment Confirmed*\n\n👤 Patient: {name}\n🩺 Doctor: {doctor}\n📅 {slot}\n\n📍 {CLINIC_ADDR}\n🗺️ {MAPS_LINK}\n\n_Please arrive 10 minutes early._")
+    return send_wa(phone, f"✅ *{CLINIC_NAME} — Appointment Confirmed*\n\n👤 Patient: {name}\n🩺 Doctor: {doctor}\n📅 {slot}\n\n📍 {CLINIC_ADDR}\n🗺️ {MAPS_LINK}\n\n_Please arrive 10 minutes early._")
 
 def send_cancellation(phone, name):
     send_wa(phone, f"❌ *{CLINIC_NAME} — Cancelled*\n\nHi {name}, your appointment has been cancelled.\nTo rebook: {MAPS_LINK}")
@@ -417,33 +453,70 @@ if user_msg:
         parts = [x.strip() for x in b.group(1).split(",")]
         if len(parts) == 4:
             n, p, d, s = parts
-            ok, err = book_appointment(n, p, d, s)
-            if ok:
-                doc_name = DOCTORS.get(d, {}).get("en", d)
-                send_confirmation(p, n, doc_name, s)
-                st.success(f"✅ Booked for **{n}** with {doc_name} on {s}. WhatsApp confirmation sent.")
-            else:
-                st.error(f"Booking failed: {err}")
+            # Validate doc_id — AI sometimes sends the name instead of the ID
+            if d not in DOCTORS:
+                d_found = next((k for k, v in DOCTORS.items()
+                                if v["en"].lower() in d.lower() or d.lower() in v["en"].lower()), None)
+                if d_found:
+                    d = d_found
+                else:
+                    st.error(f"⚠️ Could not identify doctor '{d}'. Please try again.")
+                    d = None
+            # Use the logged-in patient's phone if the AI left it blank
+            if (not p or p in ["phone", "N/A", ""]) and patient_phone:
+                p = patient_phone
+            # Use the logged-in patient's name if AI used a placeholder
+            if (not n or n in ["patient_name", "N/A", ""]) and patient_name != "Guest":
+                n = patient_name
+
+            if d:
+                ok, err = book_appointment(n, p, d, s)
+                if ok:
+                    doc_name = DOCTORS[d]["en"]
+                    specialty = DOCTORS[d]["specialty"]
+                    wa_sent = send_confirmation(p, n, f"{doc_name} ({specialty})", s)
+                    st.success(
+                        f"✅ **Appointment Confirmed**\n\n"
+                        f"- **Patient:** {n.title()}\n"
+                        f"- **Doctor:** {doc_name} · {specialty}\n"
+                        f"- **Date & Time:** {s}\n"
+                        f"- **WhatsApp:** {'Confirmation sent to ' + p if wa_sent else 'Not sent (check secrets)'}"
+                    )
+                    # Debug: confirm what was saved to DB
+                    conn2 = db_connection()
+                    saved = pd.read_sql_query(
+                        "SELECT * FROM appointments WHERE doc_id=? AND slot=?",
+                        conn2, params=(d, s))
+                    conn2.close()
+                    if not saved.empty:
+                        st.caption(f"✔ Saved to database: {saved[['patient_name','doc_id','slot']].to_dict('records')[0]}")
+                else:
+                    st.error(f"Booking failed: {err}")
 
     c = re.search(r"\[CANCEL:(.*?)\]", reply)
     if c:
         parts = [x.strip() for x in c.group(1).split(",")]
         if len(parts) == 2:
             n, d = parts
+            if n in ["patient_name", "N/A", ""] and patient_name != "Guest":
+                n = patient_name
             cancel_appointment(n, d)
-            if patient_phone: send_cancellation(patient_phone, n)
-            st.info(f"Appointment for **{n}** cancelled.")
+            p = patient_phone or ""
+            if p: send_cancellation(p, n)
+            st.info(f"Appointment for **{n.title()}** has been cancelled.")
 
     r = re.search(r"\[RESCHEDULE:(.*?)\]", reply)
     if r:
         parts = [x.strip() for x in r.group(1).split(",")]
         if len(parts) == 3:
             n, d, s = parts
+            if n in ["patient_name", "N/A", ""] and patient_name != "Guest":
+                n = patient_name
             ok, err = reschedule_appointment(n, d, s)
             if ok:
                 doc_name = DOCTORS.get(d, {}).get("en", d)
                 if patient_phone: send_reschedule(patient_phone, n, doc_name, s)
-                st.success(f"✅ Rescheduled **{n}** to {s}. WhatsApp sent.")
+                st.success(f"✅ Rescheduled **{n.title()}** to {s}.")
             else:
                 st.error(f"Reschedule failed: {err}")
 
