@@ -383,22 +383,24 @@ if not st.session_state.session["history"]:
 for m in st.session_state.session["history"]:
     st.chat_message(m["role"]).write(m["content"])
 
-audio_data = st.audio_input("Voice Input")
-if audio_data:
-    r = sr.Recognizer()
+voice_audio = st.audio_input("Voice Input")
+if voice_audio:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
-        f.write(audio_data.read())
+        f.write(voice_audio.read())
         path = f.name
     try:
+        r = sr.Recognizer()
         with sr.AudioFile(path) as src:
-            text = r.recognize_google(r.record(src))
-            if text:
-                st.session_state.voice_processed = text
+            audio = r.record(src)
+            text = r.recognize_google(audio)
+            if text and "last_voice" not in st.session_state or st.session_state.last_voice != text:
+                st.session_state.voice_data = text
+                st.session_state.last_voice = text
     except: pass
-    finally: os.unlink(path)
-    st.rerun()
+    finally:
+        if os.path.exists(path): os.unlink(path)
 
-user_input = st.chat_input("Type your message...") or st.session_state.pop("voice_processed", None)
+user_input = st.chat_input("Type your message...") or st.session_state.pop("voice_data", None)
 
 if user_input:
     st.session_state.session["history"].append({"role": "user", "content": user_input})
