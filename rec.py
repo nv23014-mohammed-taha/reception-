@@ -1,3 +1,4 @@
+import streamlit as st
 import sqlite3
 import pandas as pd
 from datetime import datetime
@@ -9,7 +10,7 @@ import speech_recognition as sr
 from fpdf import FPDF
 from mistralai import Mistral
 
-
+st.set_page_config(page_title="AlShifa Clinic", page_icon="🏥", layout="wide")
 
 st.markdown("""
 <style>
