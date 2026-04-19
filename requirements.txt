@@ -3,3 +3,4 @@ mistralai==1.2.5
 twilio
 SpeechRecognition
 pandas
+FPDF
