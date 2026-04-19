@@ -6,3 +6,4 @@ openai
 SpeechRecognition
 openai-whisper
 matplotlib
+mistralai
