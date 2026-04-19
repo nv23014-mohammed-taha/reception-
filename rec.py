@@ -1,12 +1,13 @@
-import streamlit as st
-from mistralai import Mistral          # ✅ Fixed: new SDK uses `mistralai` not `mistralai.client`
+from mistralai import Mistral
 from twilio.rest import Client
+import streamlit as st
 import sqlite3
 import pandas as pd
 from datetime import datetime, timedelta
 import os, re, tempfile
 import speech_recognition as sr
 
+# ─── Page config ─────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Clinic System", layout="wide")
 
 language = st.sidebar.selectbox("Language / اللغة", ["English", "العربية"])
@@ -14,11 +15,11 @@ language = st.sidebar.selectbox("Language / اللغة", ["English", "العرب
 def t(en, ar):
     return ar if language == "العربية" else en
 
-
+# ─── Paths ────────────────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "hospital_management.db")
+DB_PATH  = os.path.join(BASE_DIR, "hospital_management.db")
 
-# ✅ Fixed: initialize ai_client only once, avoid re-creating on every rerun
+# ─── AI client (cached) ───────────────────────────────────────────────────────
 @st.cache_resource
 def get_ai_client():
     if "MISTRAL_API_KEY" in st.secrets:
@@ -27,17 +28,15 @@ def get_ai_client():
 
 ai_client = get_ai_client()
 
-
+# ─── Database ─────────────────────────────────────────────────────────────────
 def db_connection():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
     return conn
 
-
 def setup_database():
     conn = db_connection()
-    cur = conn.cursor()
-
+    cur  = conn.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS appointments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -48,7 +47,6 @@ def setup_database():
             UNIQUE(doc_id, slot)
         )
     """)
-
     cur.execute("""
         CREATE TABLE IF NOT EXISTS doctor_schedule (
             doc_id TEXT PRIMARY KEY,
@@ -56,14 +54,12 @@ def setup_database():
             end_hour INTEGER
         )
     """)
-
     conn.commit()
     conn.close()
 
-
 setup_database()
 
-
+# ─── Data ─────────────────────────────────────────────────────────────────────
 DOCTORS = {
     "1":  {"en": "Dr. Faisal Al-Mahmood (Cardiology)",  "ar": "د. فيصل المحمود"},
     "2":  {"en": "Dr. Mariam Al-Sayed (Pediatrics)",    "ar": "د. مريم السيد"},
@@ -79,12 +75,12 @@ DOCTORS = {
 
 DEFAULT_SCHEDULE = {"start": 9, "end": 18}
 
-
+# ─── Schedule helpers ─────────────────────────────────────────────────────────
 def get_schedule(doc_id):
     conn = db_connection()
-    cur = conn.cursor()
+    cur  = conn.cursor()
     cur.execute("SELECT start_hour, end_hour FROM doctor_schedule WHERE doc_id=?", (doc_id,))
-    row = cur.fetchone()
+    row  = cur.fetchone()
     if row:
         conn.close()
         return {"start": row[0], "end": row[1]}
@@ -94,93 +90,75 @@ def get_schedule(doc_id):
     conn.close()
     return DEFAULT_SCHEDULE
 
-
 def is_future(slot):
     try:
         return datetime.strptime(slot, "%Y-%m-%d %H:%M") > datetime.now()
     except:
         return False
 
-
 def doctor_available(doc_id, slot):
     try:
         dt = datetime.strptime(slot, "%Y-%m-%d %H:%M")
-        s = get_schedule(doc_id)
+        s  = get_schedule(doc_id)
         return dt.weekday() < 5 and s["start"] <= dt.hour < s["end"]
     except:
         return False
 
-
-def next_slots(slot):
-    base = datetime.strptime(slot, "%Y-%m-%d %H:%M")
-    return [(base + timedelta(minutes=30*i)).strftime("%Y-%m-%d %H:%M") for i in range(1, 4)]
-
-
+# ─── Appointment actions ──────────────────────────────────────────────────────
 def book_appointment(name, phone, doc_id, slot):
     conn = db_connection()
-    cur = conn.cursor()
+    cur  = conn.cursor()
     try:
         name = name.lower().strip()
         cur.execute("BEGIN IMMEDIATE")
-
         if not is_future(slot):
             return False, "Pick future time"
-
         if not doctor_available(doc_id, slot):
             return False, "Doctor unavailable"
-
         cur.execute("SELECT 1 FROM appointments WHERE doc_id=? AND slot=?", (doc_id, slot))
         if cur.fetchone():
             return False, "Slot taken"
-
         cur.execute("INSERT INTO appointments VALUES(NULL,?,?,?,?)",
                     (name, phone, doc_id, slot))
         conn.commit()
         return True, None
-
     except Exception as e:
         conn.rollback()
         return False, str(e)
     finally:
         conn.close()
 
-
 def cancel_appointment(name, doc_id):
     conn = db_connection()
-    cur = conn.cursor()
+    cur  = conn.cursor()
     cur.execute("DELETE FROM appointments WHERE patient_name=? AND doc_id=?",
                 (name.lower().strip(), doc_id))
     conn.commit()
     conn.close()
     return True
 
-
 def reschedule_appointment(name, doc_id, new_slot):
     conn = db_connection()
-    cur = conn.cursor()
+    cur  = conn.cursor()
     cur.execute("SELECT 1 FROM appointments WHERE patient_name=? AND doc_id=?",
                 (name.lower().strip(), doc_id))
     if not cur.fetchone():
         conn.close()
         return False, "Not found"
-
     if not doctor_available(doc_id, new_slot):
         conn.close()
         return False, "Doctor unavailable"
-
     cur.execute("SELECT 1 FROM appointments WHERE doc_id=? AND slot=?", (doc_id, new_slot))
     if cur.fetchone():
         conn.close()
         return False, "Slot taken"
-
     cur.execute("UPDATE appointments SET slot=? WHERE patient_name=? AND doc_id=?",
                 (new_slot, name.lower().strip(), doc_id))
     conn.commit()
     conn.close()
     return True, None
 
-
-# ✅ Fixed: removed broken `from whatsapp_bot import send_whatsapp` — function is defined here
+# ─── WhatsApp ─────────────────────────────────────────────────────────────────
 def send_whatsapp(phone, name, doctor, slot):
     try:
         client = Client(
@@ -193,9 +171,9 @@ def send_whatsapp(phone, name, doctor, slot):
             to=f"whatsapp:{phone}"
         )
     except Exception as e:
-        st.warning(f"WhatsApp notification failed: {e}")   # ✅ Fixed: silent fail → visible warning
+        st.warning(f"WhatsApp notification failed: {e}")
 
-
+# ─── Audio ────────────────────────────────────────────────────────────────────
 def transcribe_audio(audio_bytes):
     r = sr.Recognizer()
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
@@ -204,91 +182,79 @@ def transcribe_audio(audio_bytes):
     try:
         with sr.AudioFile(path) as src:
             audio = r.record(src)
-        text = r.recognize_google(audio)
-    except Exception:
-        text = "Could not understand audio"
+        return r.recognize_google(audio)
+    except:
+        return "Could not understand audio"
     finally:
-        os.unlink(path)   # ✅ Fixed: moved to finally so file is always cleaned up
-    return text
+        os.unlink(path)
 
-
-# ── Sidebar ──────────────────────────────────────────────────────────────────
+# ─── Sidebar ──────────────────────────────────────────────────────────────────
 st.sidebar.title(t("Navigation", "التنقل"))
-
 if os.path.exists(DB_PATH):
     with open(DB_PATH, "rb") as f:
         st.sidebar.download_button(
             t("Download Database", "تحميل قاعدة البيانات"),
-            f,
-            file_name="clinic.db"
+            f, file_name="clinic.db"
         )
 
-# ── Tabs ──────────────────────────────────────────────────────────────────────
+# ─── Tabs ─────────────────────────────────────────────────────────────────────
 chat_tab, admin_tab = st.tabs([t("Chat", "المحادثة"), t("Administration", "الإدارة")])
 
-
-# ── Chat Tab ──────────────────────────────────────────────────────────────────
+# ─── Chat tab ─────────────────────────────────────────────────────────────────
 with chat_tab:
     st.title(t("Clinic Assistant", "مساعد العيادة"))
 
     if "history" not in st.session_state:
         st.session_state.history = []
 
-    # ✅ Fixed: render existing chat history so it persists visually across reruns
+    # Render existing history
     for msg in st.session_state.history:
         st.chat_message(msg["role"]).markdown(msg["content"])
 
     audio = st.audio_input(t("Speak", "تحدث"))
-
     if audio:
-        txt = transcribe_audio(audio.getvalue())
-        st.session_state["voice_pending"] = txt
+        st.session_state["voice_pending"] = transcribe_audio(audio.getvalue())
 
     user_msg = st.chat_input(t("Type message", "اكتب رسالة"))
-
     if not user_msg and st.session_state.get("voice_pending"):
         user_msg = st.session_state.pop("voice_pending")
 
     if user_msg:
         st.session_state.history.append({"role": "user", "content": user_msg})
-        st.chat_message("user").markdown(user_msg)   # ✅ Fixed: show user bubble immediately
+        st.chat_message("user").markdown(user_msg)
 
-        doctor_list = "\n".join(
-            f"{k}: {v['en']}" for k, v in DOCTORS.items()
-        )
-
+        doctor_list = "\n".join(f"{k}: {v['en']}" for k, v in DOCTORS.items())
         system_prompt = f"""You are a clinic appointment assistant.
 Doctors work Sunday–Thursday, 9 AM–6 PM only. Never suggest past times.
 
 Available doctors:
 {doctor_list}
 
-To book an appointment output exactly: [BOOKING: patient_name, phone, doc_id, YYYY-MM-DD HH:MM]
-To cancel output exactly:             [CANCEL: patient_name, doc_id]
-To reschedule output exactly:         [RESCHEDULE: patient_name, doc_id, YYYY-MM-DD HH:MM]
+To book output:       [BOOKING: patient_name, phone, doc_id, YYYY-MM-DD HH:MM]
+To cancel output:     [CANCEL: patient_name, doc_id]
+To reschedule output: [RESCHEDULE: patient_name, doc_id, YYYY-MM-DD HH:MM]
 """
 
         if ai_client:
             try:
-                # ✅ Fixed: correct Mistral v1 SDK call syntax
-                res = ai_client.chat.complete(
+                res   = ai_client.chat.complete(
                     model="mistral-large-latest",
                     messages=[{"role": "system", "content": system_prompt}]
-                    + st.session_state.history,
+                             + st.session_state.history,
                 )
                 reply = res.choices[0].message.content
             except Exception as e:
                 reply = f"AI error: {e}"
         else:
             reply = t(
-                "⚠️ AI is not configured. Add MISTRAL_API_KEY to your secrets.",
+                "⚠️ AI not configured. Add MISTRAL_API_KEY to Streamlit secrets.",
                 "⚠️ الذكاء الاصطناعي غير مفعّل. أضف MISTRAL_API_KEY إلى الأسرار."
             )
 
         st.chat_message("assistant").markdown(reply)
         st.session_state.history.append({"role": "assistant", "content": reply})
 
-        # ── Action parsing ────────────────────────────────────────────────────
+        # Action parsing
         b = re.search(r"\[BOOKING:(.*?)\]", reply)
         if b:
             parts = [x.strip() for x in b.group(1).split(",")]
@@ -297,7 +263,7 @@ To reschedule output exactly:         [RESCHEDULE: patient_name, doc_id, YYYY-MM
                 ok, err = book_appointment(n, p, d, s)
                 if ok:
                     send_whatsapp(p, n, DOCTORS.get(d, {}).get("en", d), s)
-                    st.success(t(f"Appointment booked for {n}!", f"تم حجز موعد لـ {n}!"))
+                    st.success(t(f"Booked for {n}!", f"تم الحجز لـ {n}!"))
                 else:
                     st.error(t(f"Booking failed: {err}", f"فشل الحجز: {err}"))
 
@@ -307,7 +273,7 @@ To reschedule output exactly:         [RESCHEDULE: patient_name, doc_id, YYYY-MM
             if len(parts) == 2:
                 n, d = parts
                 cancel_appointment(n, d)
-                st.info(t(f"Appointment cancelled for {n}.", f"تم إلغاء موعد {n}."))
+                st.info(t(f"Cancelled for {n}.", f"تم الإلغاء لـ {n}."))
 
         r = re.search(r"\[RESCHEDULE:(.*?)\]", reply)
         if r:
@@ -320,13 +286,12 @@ To reschedule output exactly:         [RESCHEDULE: patient_name, doc_id, YYYY-MM
                 else:
                     st.error(t(f"Reschedule failed: {err}", f"فشلت إعادة الجدولة: {err}"))
 
-
-# ── Admin Tab ─────────────────────────────────────────────────────────────────
+# ─── Admin tab ────────────────────────────────────────────────────────────────
 with admin_tab:
     st.subheader(t("Administration Panel", "لوحة الإدارة"))
 
     conn = db_connection()
-    df = pd.read_sql_query("SELECT * FROM appointments", conn)
+    df   = pd.read_sql_query("SELECT * FROM appointments", conn)
     conn.close()
 
     st.metric(t("Total Appointments", "إجمالي المواعيد"), len(df))
@@ -339,16 +304,16 @@ with admin_tab:
         format_func=lambda x: DOCTORS[x]["en"]
     )
 
-    s = get_schedule(doc)
+    s     = get_schedule(doc)
     start = st.number_input(t("Start Hour", "بداية الدوام"), 0, 23, s["start"])
     end   = st.number_input(t("End Hour",   "نهاية الدوام"), 0, 23, s["end"])
 
     if st.button(t("Save Schedule", "حفظ الجدول")):
         if start >= end:
-            st.error(t("Start hour must be before end hour.", "يجب أن تكون بداية الدوام قبل نهايته."))
+            st.error(t("Start must be before end.", "يجب أن تكون البداية قبل النهاية."))
         else:
             conn = db_connection()
-            cur = conn.cursor()
+            cur  = conn.cursor()
             cur.execute("REPLACE INTO doctor_schedule VALUES (?,?,?)", (doc, start, end))
             conn.commit()
             conn.close()
@@ -360,10 +325,9 @@ with admin_tab:
         st.info(t("No appointments yet.", "لا توجد مواعيد بعد."))
     else:
         for d in DOCTORS:
-            doctor_df = df[df["doc_id"] == d]
-            label = f"{DOCTORS[d]['en']} ({len(doctor_df)})"
-            with st.expander(label):
-                if doctor_df.empty:
+            doc_df = df[df["doc_id"] == d]
+            with st.expander(f"{DOCTORS[d]['en']} ({len(doc_df)})"):
+                if doc_df.empty:
                     st.write(t("No appointments.", "لا توجد مواعيد."))
                 else:
-                    st.dataframe(doctor_df, use_container_width=True)
+                    st.dataframe(doc_df, use_container_width=True)
