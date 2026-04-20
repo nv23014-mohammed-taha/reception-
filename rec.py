@@ -10,7 +10,7 @@ import speech_recognition as sr
 from fpdf import FPDF
 from mistralai import Mistral
 
-st.set_page_config(page_title="AlShifa Clinic", page_icon="🏥", layout="wide")
+st.set_page_config(page_title="Clinic recepction", layout="wide")
 
 st.markdown("""
 <style>
