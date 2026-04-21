@@ -10,7 +10,7 @@ import speech_recognition as sr
 from fpdf import FPDF
 from mistralai import Mistral
 
-st.set_page_config(page_title="AlShifa Clinic", layout="wide")
+st.set_page_config(page_title="AlShifa Clinic", page_icon="🏥", layout="wide")
 
 st.markdown("""
 <style>
@@ -158,7 +158,11 @@ DOCTORS = {
 @st.cache_resource
 def connect_ai():
     key = st.secrets.get("MISTRAL_API_KEY")
-    return Mistral(api_key=key) if key else None
+    if not key: return None
+    try:
+        return Mistral(api_key=key)
+    except:
+        return None
 
 def get_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -309,7 +313,7 @@ if not st.session_state.session["user"]:
         with t2:
             pw = st.text_input("Access Key", type="password")
             if st.button("Staff Login", use_container_width=True):
-                if hashlib.sha256(pw.encode()).hexdigest() == hashlib.sha256(b"admin123").hexdigest():
+                if pw == "admin123":
                     st.session_state.session["user"] = "admin"
                     st.rerun()
                 else: st.error("Invalid key")
@@ -414,11 +418,15 @@ if user_input:
     st.session_state.session["history"].append({"role": "user", "content": user_input})
     st.chat_message("user").write(user_input)
     
+    raw_reply = ""
     if ai:
-        res = ai.chat.complete(model="mistral-large-latest", messages=[{"role": "system", "content": PROMPT}] + st.session_state.session["history"])
-        raw_reply = res.choices[0].message.content
+        try:
+            res = ai.chat.complete(model="mistral-large-latest", messages=[{"role": "system", "content": PROMPT}] + st.session_state.session["history"])
+            raw_reply = res.choices[0].message.content
+        except Exception as e:
+            raw_reply = f"I'm sorry, I'm having trouble connecting to my brain right now. Error: {str(e)}"
     else:
-        raw_reply = "AI assistant is currently offline."
+        raw_reply = "The AI assistant is currently offline. Please check your configuration."
         
     clean_reply = re.sub(r'\[.*?\]', '', raw_reply).strip()
     st.chat_message("assistant").write(clean_reply)
