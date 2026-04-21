@@ -17,7 +17,7 @@ DOCTORS = {
     "10": "Dr. Ahmed Al-Aali (General Medicine)"
 }
 
-st.title("📊 Hospital Operations Dashboard")
+st.title("Hospital Operations Dashboard")
 st.markdown("---")
 
 def get_data():
@@ -28,7 +28,7 @@ def get_data():
 
 df = get_data()
 
-st.header("👨‍⚕️ Individual Doctor Schedules")
+st.header("Individual Doctor Schedules")
 
 if not df.empty:
     col1, col2 = st.columns([1, 3])
@@ -51,7 +51,7 @@ if not df.empty:
 else:
     st.info("No data available yet. Please book an appointment through the AI Chat.")
 st.divider()
-if st.button("🚨 Reset All Hospital Data"):
+if st.button("Reset All Hospital Data"):
     conn = sqlite3.connect('hospital_management.db')
     conn.execute("DELETE FROM appointments")
     conn.commit()
@@ -61,7 +61,7 @@ if st.button("🚨 Reset All Hospital Data"):
     # Add this to the bottom of Dashboard.py
 with open("hospital_management.db", "rb") as f:
     st.download_button(
-        label="💾 Download Database File (.db)",
+        label="Download Database File (.db)",
         data=f,
         file_name="hospital_data_backup.db",
         mime="application/x-sqlite3"
