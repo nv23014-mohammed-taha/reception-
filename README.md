@@ -1,10 +1,10 @@
-# reception-# AlShifa Clinic Reception System
+## AlShifa Clinic Reception System
 
 I built this for my project — it's basically a clinic receptionist that runs in your browser. Instead of filling out some boring form to book an appointment, you just chat with an AI and it handles everything.
 
 It's built in Python using Streamlit, and the AI part runs on Mistral. The whole thing took a while to get working properly, especially the voice input.
 
----
+
 
 ## What it actually does
 
@@ -14,7 +14,6 @@ There's also a staff login that opens a completely different dashboard where you
 
 Oh and there's voice input too — you can just speak instead of typing, it uses Google's speech-to-text under the hood.
 
----
 
 ## The part I'm most proud of
 
@@ -44,7 +43,6 @@ The app strips the tag before showing the message, then separately scans for it 
 - SpeechRecognition — for the voice input feature
 - Pandas — for the admin appointments table
 
----
 
 ## Running it yourself
 
@@ -68,7 +66,6 @@ Then just run:
 streamlit run rec.py
 ```
 
----
 
 ## Logging in
 
@@ -76,7 +73,6 @@ streamlit run rec.py
 - **Staff** — password is `admin123`
 - **Guest** — can browse but can't book anything
 
----
 
 ## How bookings are validated
 
@@ -89,7 +85,6 @@ Before anything gets saved to the database, the app checks:
 
 The database also has a `UNIQUE(doc_id, slot)` constraint as a backup so even if something slips through, the insert will fail cleanly.
 
----
 
 ## Stuff I know is not perfect
 
@@ -101,13 +96,11 @@ The database also has a `UNIQUE(doc_id, slot)` constraint as a backup so even if
 
 **Chat history** — the full conversation gets sent to Mistral every single message. For a long chat that's going to hit the context limit eventually. Would need to truncate or summarize old messages.
 
----
 
 ## Doctors in the system
 
 10 doctors across different specialties — Cardiology, Pediatrics, Orthopedics, Dermatology, General Medicine, Gynecology, Neurology, Ophthalmology, ENT, and Psychiatry. Their schedules default to 9am–6pm Sunday to Thursday but the admin can change that.
 
----
 
 ## Clinic details
 
