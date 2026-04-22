@@ -1,6 +1,6 @@
 ## AlShifa Clinic Reception System
 
-I built this for my project — it's basically a clinic receptionist that runs in your browser. Instead of filling out some boring form to book an appointment, you just chat with an AI and it handles everything.
+I built this for my project it's basically a clinic receptionist that runs in your browser. Instead of filling out some boring form to book an appointment, you just chat with an AI and it handles everything.
 
 It's built in Python using Streamlit, and the AI part runs on Mistral. The whole thing took a while to get working properly, especially the voice input.
 
@@ -36,7 +36,7 @@ The app strips the tag before showing the message, then separately scans for it 
 
 ## Tech used
 
-- Python + Streamlit — the whole UI is just Python, no HTML needed
+- Python + Streamlit — the whole UI is just Python, no HTML needed but i used it for the consumer appel
 - Mistral AI (`mistral-large-latest`) — the chat model
 - SQLite — stores appointments and doctor schedules
 - FPDF — generates the PDF receipts
@@ -88,9 +88,9 @@ The database also has a `UNIQUE(doc_id, slot)` constraint as a backup so even if
 
 ## Stuff I know is not perfect
 
-**Password hashing** — I'm using SHA-256 with no salt for the admin password. It's not great, in a real system I'd use bcrypt. But it's a student project so I left it.
+**Password hashing** I'm using SHA-256 with no salt for the admin password. It's not great, in a real system I'd use bcrypt. But it's a student project so I left it and I foucsed on other issues to fix and didnt get time for this one.
 
-**The regex parsing** — if Mistral decides to format `[BOOKING: ...]` slightly differently one day, the whole thing breaks. The proper fix would be to use Mistral's function calling feature so you get structured output guaranteed. I know how to fix it, just didn't implement it here.
+**The regex parsing**  if Mistral decides to format `[BOOKING: ...]` slightly differently one day, the whole thing breaks. The proper fix would be to use Mistral's function calling feature so you get structured output guaranteed. I know how to fix it, just didn't implement it here.
 
 **Patient identity** — patients are identified by name only (stored lowercase). If two people have the same name that could cause issues. Would need a proper user ID system for production.
 
@@ -99,13 +99,11 @@ The database also has a `UNIQUE(doc_id, slot)` constraint as a backup so even if
 
 ## Doctors in the system
 
-10 doctors across different specialties — Cardiology, Pediatrics, Orthopedics, Dermatology, General Medicine, Gynecology, Neurology, Ophthalmology, ENT, and Psychiatry. Their schedules default to 9am–6pm Sunday to Thursday but the admin can change that.
+10 doctors across different specialties — Cardiology, Pediatrics, Orthopedics, Dermatology, General Medicine, Gynecology, Neurology, Ophthalmology, ENT, and Psychiatry. Their schedules default to 9am–6pm Sunday to Thursday but the admin can change that and it will be refelected when the clinet books.
 
 
 ## Clinic details
 
 AlShifa Clinic, Building 115, Block 945, Street 4504, Awali, Bahrain. Open Sun–Thu 9am to 6pm.
 
----
-
-*Student project — 2025*
+thank you for reading:)
