@@ -97,6 +97,9 @@ The database also has a `UNIQUE(doc_id, slot)` constraint as a backup so even if
 **Chat history** — the full conversation gets sent to Mistral every single message. For a long chat that's going to hit the context limit eventually. Would need to truncate or summarize old messages.
 
 
+(I also want to add teh arabic laguage in the voice feature)
+
+
 ## Doctors in the system
 
 10 doctors across different specialties — Cardiology, Pediatrics, Orthopedics, Dermatology, General Medicine, Gynecology, Neurology, Ophthalmology, ENT, and Psychiatry. Their schedules default to 9am–6pm Sunday to Thursday but the admin can change that and it will be refelected when the clinet books.
